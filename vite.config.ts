@@ -3,6 +3,7 @@ import { tanstackStart } from '@tanstack/react-start/plugin/vite'
 import viteReact from '@vitejs/plugin-react'
 import viteTsConfigPaths from 'vite-tsconfig-paths'
 import tailwindcss from '@tailwindcss/vite'
+import { nitro } from 'nitro/vite' // <-- Import Nitro
 
 const config = defineConfig({
   plugins: [
@@ -10,7 +11,8 @@ const config = defineConfig({
       projects: ['./tsconfig.json'],
     }),
     tailwindcss(),
-    tanstackStart(), // <-- Make sure it looks exactly like this! Nothing inside the brackets.
+    tanstackStart(),
+    nitro(), // <-- Add Nitro to the plugins array
     viteReact(),
   ],
 })
