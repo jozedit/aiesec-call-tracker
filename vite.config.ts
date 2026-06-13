@@ -10,11 +10,7 @@ const config = defineConfig({
       projects: ['./tsconfig.json'],
     }),
     tailwindcss(),
-    tanstackStart({
-      server: {
-        preset: 'vercel' // <-- This tells the app to build Vercel Serverless Functions
-      }
-    }),
+    tanstackStart(), // <-- Make sure it looks exactly like this! Nothing inside the brackets.
     viteReact(),
   ],
 })
