@@ -985,21 +985,57 @@ function AdminMemberView({ member, csvData, callEdits, assignments, effectiveSta
 }
 
 // ─── ASSIGN VIEW ──────────────────────────────────────────────────────────────
+const PAGE_SIZE = 100;
+
 function AssignView({ csvData, callEdits, assignments, effectiveStatus, effectiveAssignment, saveAssignments, showToast, members }) {
   const [selectedMember, setSelectedMember] = useState(null);
   const [assignDate, setAssignDate] = useState(today());
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState(new Set());
+  const [filterProgram, setFilterProgram] = useState('');
+  const [sortBy, setSortBy] = useState('row');
+  const [sortDir, setSortDir] = useState('asc');
+  const [page, setPage] = useState(0);
   const isMobile = useIsMobile();
 
   if (!csvData) return <div style={{ padding: 32, color: S.text2 }}>Load a sheet first from the Sheets tab to assign calls.</div>;
 
+  // collect unique programs for filter dropdown
+  const allPrograms = [...new Set(csvData.rows.map(r => getCol(r._raw, csvData.col.program)).filter(Boolean))].sort();
+
   const unassigned = csvData.rows.filter(r => !effectiveAssignment(r));
-  const filtered = search ? unassigned.filter(r => getCol(r._raw, csvData.col.name).toLowerCase().includes(search.toLowerCase()) || getCol(r._raw, csvData.col.phone).includes(search)) : unassigned;
+
+  // filter
+  let filtered = unassigned;
+  if (search) filtered = filtered.filter(r => getCol(r._raw, csvData.col.name).toLowerCase().includes(search.toLowerCase()) || getCol(r._raw, csvData.col.phone).includes(search));
+  if (filterProgram) filtered = filtered.filter(r => getCol(r._raw, csvData.col.program) === filterProgram);
+
+  // sort
+  filtered = [...filtered].sort((a, b) => {
+    let valA, valB;
+    if (sortBy === 'row') { valA = a._idx; valB = b._idx; }
+    else if (sortBy === 'name') { valA = getCol(a._raw, csvData.col.name).toLowerCase(); valB = getCol(b._raw, csvData.col.name).toLowerCase(); }
+    else if (sortBy === 'program') { valA = getCol(a._raw, csvData.col.program).toLowerCase(); valB = getCol(b._raw, csvData.col.program).toLowerCase(); }
+    if (valA < valB) return sortDir === 'asc' ? -1 : 1;
+    if (valA > valB) return sortDir === 'asc' ? 1 : -1;
+    return 0;
+  });
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages - 1);
+  const pageRows = filtered.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
 
   const toggleSelect = (idx) => {
     const s = new Set(selected);
     s.has(idx) ? s.delete(idx) : s.add(idx);
+    setSelected(s);
+  };
+
+  const togglePageSelect = () => {
+    const pageIdxs = pageRows.map(r => r._idx);
+    const allSelected = pageIdxs.every(i => selected.has(i));
+    const s = new Set(selected);
+    pageIdxs.forEach(i => allSelected ? s.delete(i) : s.add(i));
     setSelected(s);
   };
 
@@ -1013,33 +1049,77 @@ function AssignView({ csvData, callEdits, assignments, effectiveStatus, effectiv
     showToast(`Assigned ${selected.size} calls to ${selectedMember} ✓`);
   };
 
+  const cycleSort = (field) => {
+    if (sortBy === field) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortBy(field); setSortDir('asc'); }
+    setPage(0);
+  };
+
+  const sortIcon = (field) => sortBy === field ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ' ↕';
+
+  const pageAllSelected = pageRows.length > 0 && pageRows.every(r => selected.has(r._idx));
+
   return (
-    <div style={{ padding: isMobile ? '12px 10px' : '20px 16px' }}>
+    <div style={{ padding: isMobile ? '12px 10px' : '20px 24px' }}>
       <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 20 }}>Assign Calls</div>
 
-      <div style={{ display: 'flex', gap: 12, marginBottom: 18, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+      {/* Assign bar */}
+      <div style={{ ...card({ marginBottom: 20 }) }}>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          <div>
+            <span style={lbl()}>Assign to</span>
+            <select value={selectedMember || ''} onChange={e => setSelectedMember(e.target.value)} style={sel({ width: 'auto' })}>
+              <option value="">Select member…</option>
+              {members.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div>
+            <span style={lbl()}>For date</span>
+            <input type="date" value={assignDate} onChange={e => setAssignDate(e.target.value)} style={inp({ width: 'auto' })} />
+          </div>
+          <button onClick={assignSelected} disabled={selected.size === 0} style={btn('accent', { opacity: selected.size === 0 ? 0.4 : 1 })}>
+            Assign {selected.size > 0 ? `(${selected.size})` : ''} →
+          </button>
+          {selected.size > 0 && <button onClick={() => setSelected(new Set())} style={btn('ghost', { fontSize: 12 })}>Clear selection</button>}
+        </div>
+      </div>
+
+      {/* Filters & sort row */}
+      <div style={{ display: 'flex', gap: 10, marginBottom: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        <input value={search} onChange={e => { setSearch(e.target.value); setPage(0); }} placeholder="Search name or phone…" style={{ ...inp({ flex: 1, minWidth: 160 }) }} />
         <div>
-          <span style={lbl()}>Assign to</span>
-          <select value={selectedMember || ''} onChange={e => setSelectedMember(e.target.value)} style={sel({ width: 'auto' })}>
-            <option value="">Select member…</option>
-            {members.map(m => <option key={m} value={m}>{m}</option>)}
+          <span style={lbl()}>Program</span>
+          <select value={filterProgram} onChange={e => { setFilterProgram(e.target.value); setPage(0); }} style={sel({ width: 'auto' })}>
+            <option value="">All programs</option>
+            {allPrograms.map(p => <option key={p} value={p}>{p}</option>)}
           </select>
         </div>
         <div>
-          <span style={lbl()}>For date</span>
-          <input type="date" value={assignDate} onChange={e => setAssignDate(e.target.value)} style={inp({ width: 'auto' })} />
+          <span style={lbl()}>Sort by</span>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {[['row', 'Row'], ['name', 'Name'], ['program', 'Program']].map(([field, label]) => (
+              <button key={field} onClick={() => cycleSort(field)} style={{ ...btn(sortBy === field ? 'default' : 'ghost', { fontSize: 12, padding: '7px 11px', borderColor: sortBy === field ? S.accent : S.border2, color: sortBy === field ? S.accent : S.text2 }) }}>
+                {label}{sortIcon(field)}
+              </button>
+            ))}
+          </div>
         </div>
-        <button onClick={assignSelected} disabled={selected.size === 0} style={btn('accent', { opacity: selected.size === 0 ? 0.4 : 1 })}>
-          Assign {selected.size > 0 ? `(${selected.size})` : ''} →
-        </button>
-        {selected.size > 0 && <button onClick={() => setSelected(new Set())} style={btn('ghost', { fontSize: 12 })}>Clear</button>}
       </div>
 
-      <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search unassigned calls…" style={{ ...inp(), marginBottom: 14 }} />
-      <div style={{ fontSize: 12, color: S.text2, marginBottom: 8 }}>{unassigned.length} unassigned · showing {filtered.length}</div>
+      {/* Stats row */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: S.text2 }}>
+          {unassigned.length} unassigned · {filtered.length} matching · {selected.size > 0 && <span style={{ color: S.accent }}>{selected.size} selected · </span>}
+          page {safePage + 1} of {totalPages}
+        </div>
+        <button onClick={togglePageSelect} style={btn('ghost', { fontSize: 11, padding: '4px 10px' })}>
+          {pageAllSelected ? 'Deselect page' : 'Select page'}
+        </button>
+      </div>
 
+      {/* List */}
       <div style={{ display: 'grid', gap: 6 }}>
-        {filtered.slice(0, 100).map(row => {
+        {pageRows.map(row => {
           const name = getCol(row._raw, csvData.col.name) || 'Unknown';
           const phone = getCol(row._raw, csvData.col.phone);
           const prog = getCol(row._raw, csvData.col.program);
@@ -1056,13 +1136,26 @@ function AssignView({ csvData, callEdits, assignments, effectiveStatus, effectiv
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
                 <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: S.text3, background: S.surface2, border: `1px solid ${S.border}`, borderRadius: 5, padding: '2px 7px' }}>row {sheetRow}</div>
-                {csvData.sheetName && <div style={{ fontSize: 10, color: S.text3 }}>{csvData.sheetName}</div>}
+                {prog && <div style={{ fontSize: 10, color: S.blue, background: 'rgba(88,166,255,.1)', border: `1px solid rgba(88,166,255,.2)`, borderRadius: 4, padding: '1px 6px' }}>{prog}</div>}
               </div>
             </div>
           );
         })}
-        {filtered.length === 0 && <div style={{ textAlign: 'center', color: S.text3, padding: 20, fontSize: 13 }}>No unassigned calls found.</div>}
+        {filtered.length === 0 && <div style={{ textAlign: 'center', color: S.text3, padding: 20, fontSize: 13 }}>No unassigned calls match the current filters.</div>}
       </div>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 20, flexWrap: 'wrap' }}>
+          <button onClick={() => setPage(0)} disabled={safePage === 0} style={btn('ghost', { fontSize: 12, padding: '6px 10px', opacity: safePage === 0 ? 0.4 : 1 })}>«</button>
+          <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={safePage === 0} style={btn('ghost', { fontSize: 12, padding: '6px 12px', opacity: safePage === 0 ? 0.4 : 1 })}>‹ Prev</button>
+          {Array.from({ length: totalPages }, (_, i) => i).filter(i => Math.abs(i - safePage) <= 2).map(i => (
+            <button key={i} onClick={() => setPage(i)} style={btn(i === safePage ? 'default' : 'ghost', { fontSize: 12, padding: '6px 12px', borderColor: i === safePage ? S.accent : S.border2, color: i === safePage ? S.accent : S.text2 })}>{i + 1}</button>
+          ))}
+          <button onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))} disabled={safePage === totalPages - 1} style={btn('ghost', { fontSize: 12, padding: '6px 12px', opacity: safePage === totalPages - 1 ? 0.4 : 1 })}>Next ›</button>
+          <button onClick={() => setPage(totalPages - 1)} disabled={safePage === totalPages - 1} style={btn('ghost', { fontSize: 12, padding: '6px 10px', opacity: safePage === totalPages - 1 ? 0.4 : 1 })}>»</button>
+        </div>
+      )}
     </div>
   );
 }
