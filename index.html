@@ -24,8 +24,8 @@
 const { useState, useEffect, useRef, useCallback } = React;
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
-const MEMBERS = ['Aya', 'Nada', 'Lilian'];
-const ADMINS = ['Joseph', 'Askar'];
+const DEFAULT_MEMBERS = ['Aya', 'Nada', 'Lilian'];
+const DEFAULT_ADMINS = ['Joseph', 'Askar'];
 const DEFAULT_PINS = { Joseph: '1234', Askar: '1234' };
 const STATUS_OPTIONS = ['Yes', 'No Answer', 'Out of Service', 'Busy'];
 const INTEREST_OPTIONS = ['', 'Yes', 'No', "Don't Call Me Again"];
@@ -250,6 +250,8 @@ function App() {
   const [callEdits, setCallEdits] = useState({});
   const [assignments, setAssignments] = useState({});
   const [pins, setPins] = useState({ ...DEFAULT_PINS });
+  const [members, setMembers] = useState(DEFAULT_MEMBERS);
+  const [admins, setAdmins] = useState(DEFAULT_ADMINS);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);
   const [sheets, setSheets] = useState([]);
@@ -267,6 +269,8 @@ function App() {
       setLoading(true);
       const [settings, sheetList] = await Promise.all([apiGetSettings(), apiGetSheets()]);
       if (settings.pins) setPins(p => ({ ...p, ...settings.pins }));
+      if (Array.isArray(settings.members)) setMembers(settings.members);
+      if (Array.isArray(settings.admins)) setAdmins(settings.admins);
       setSheets(sheetList);
 
       let targetId = settings.activeSheetId || null;
@@ -357,13 +361,13 @@ function App() {
   }, [assignments, csvData]);
 
   const handleLogin = useCallback((user, pin) => {
-    if (ADMINS.includes(user)) {
+    if (admins.includes(user)) {
       if (pin !== (pins[user] || DEFAULT_PINS[user])) { showToast('Wrong PIN', 'err'); return; }
       setCurrentUser(user); setScreen('admin');
     } else {
       setCurrentUser(user); setScreen('member');
     }
-  }, [pins, showToast]);
+  }, [pins, admins, showToast]);
 
   if (loading) return (
     <div style={{ background: S.bg, minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: S.text2, fontFamily: "'DM Sans', sans-serif" }}>
@@ -373,7 +377,7 @@ function App() {
 
   return (
     <div style={{ background: S.bg, minHeight: '100vh', fontFamily: "'DM Sans', sans-serif", color: S.text, position: 'relative' }}>
-      {screen === 'welcome' && <WelcomeScreen onLogin={handleLogin} csvData={csvData} />}
+      {screen === 'welcome' && <WelcomeScreen onLogin={handleLogin} csvData={csvData} members={members} admins={admins} />}
       {screen === 'member' && currentUser && (
         <MemberScreen
           isMobile={isMobile} user={currentUser} csvData={csvData} callEdits={callEdits}
@@ -387,10 +391,12 @@ function App() {
           isMobile={isMobile} user={currentUser} csvData={csvData} callEdits={callEdits}
           assignments={assignments} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment}
           saveEdits={saveEdits} saveAssignments={saveAssignments} onCSV={handleCSV}
-          showToast={showToast} pins={pins} sheets={sheets}
+          showToast={showToast} pins={pins} sheets={sheets} members={members} admins={admins}
           onPinChange={async (u, p) => { const np = { ...pins, [u]: p }; setPins(np); await apiSaveSettings({ pins: np }); }}
           onLogout={() => { setCurrentUser(null); setScreen('welcome'); }}
           loadSheet={loadSheet} deleteSheet={deleteSheet}
+          onMembersChange={async (newMembers) => { setMembers(newMembers); await apiSaveSettings({ members: newMembers }); }}
+          onAdminsChange={async (newAdmins) => { setAdmins(newAdmins); await apiSaveSettings({ admins: newAdmins }); }}
         />
       )}
       {toast && (
@@ -403,7 +409,7 @@ function App() {
 }
 
 // ─── WELCOME SCREEN ───────────────────────────────────────────────────────────
-function WelcomeScreen({ onLogin, csvData }) {
+function WelcomeScreen({ onLogin, csvData, members, admins }) {
   const [step, setStep] = useState('pick');
   const [selected, setSelected] = useState(null);
   const [pin, setPin] = useState('');
@@ -411,7 +417,7 @@ function WelcomeScreen({ onLogin, csvData }) {
 
   const handlePick = (user) => {
     setSelected(user);
-    if (ADMINS.includes(user)) setStep('pin');
+    if (admins.includes(user)) setStep('pin');
     else onLogin(user, null);
   };
 
@@ -436,7 +442,7 @@ function WelcomeScreen({ onLogin, csvData }) {
       {step === 'pick' && (
         <div style={{ width: '100%', maxWidth: 380 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 16 }}>
-            {MEMBERS.map(m => (
+            {members.map(m => (
               <button key={m} onClick={() => handlePick(m)} style={{ ...btn('ghost'), justifyContent: 'center', padding: '18px 8px', flexDirection: 'column', gap: 8, borderRadius: 12, fontSize: 15, fontWeight: 500, color: S.text }}>
                 <span style={{ fontSize: 26 }}>👤</span>{m}
               </button>
@@ -444,7 +450,7 @@ function WelcomeScreen({ onLogin, csvData }) {
           </div>
           <div style={{ fontSize: 11, color: S.text3, textAlign: 'center', marginBottom: 10, letterSpacing: '.05em', textTransform: 'uppercase' }}>— Admin —</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            {ADMINS.map(m => (
+            {admins.map(m => (
               <button key={m} onClick={() => handlePick(m)} style={{ ...btn('ghost'), justifyContent: 'center', padding: '18px 8px', flexDirection: 'column', gap: 8, borderRadius: 12, fontSize: 15, fontWeight: 500, color: S.text }}>
                 <span style={{ fontSize: 26 }}>🔒</span>{m}
               </button>
@@ -564,7 +570,7 @@ function MemberScreen({ isMobile, user, csvData, callEdits, assignments, effecti
 }
 
 // ─── ADMIN SCREEN ─────────────────────────────────────────────────────────────
-function AdminScreen({ isMobile, user, csvData, callEdits, assignments, effectiveStatus, effectiveAssignment, saveEdits, saveAssignments, onCSV, showToast, pins, onPinChange, onLogout, sheets, loadSheet, deleteSheet }) {
+function AdminScreen({ isMobile, user, csvData, callEdits, assignments, effectiveStatus, effectiveAssignment, saveEdits, saveAssignments, onCSV, showToast, pins, onPinChange, onLogout, sheets, loadSheet, deleteSheet, members, admins, onMembersChange, onAdminsChange }) {
   const [view, setView] = useState('overview');
   const [focusMember, setFocusMember] = useState(null);
   const [selectedCall, setSelectedCall] = useState(null);
@@ -588,19 +594,19 @@ function AdminScreen({ isMobile, user, csvData, callEdits, assignments, effectiv
             <button key={k} onClick={() => { setView(k); setFocusMember(null); setSelectedCall(null); setNavOpen(false); }} style={{ textAlign: 'left', padding: '9px 12px', borderRadius: 8, border: `1px solid ${view === k && !focusMember ? S.accent : 'transparent'}`, background: view === k && !focusMember ? S.accentDim : 'transparent', color: view === k && !focusMember ? S.accent : S.text2, fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: "'DM Sans', sans-serif" }}>{lbl}</button>
           ))}
           <div style={{ fontSize: 11, color: S.text3, padding: '12px 12px 4px', textTransform: 'uppercase', letterSpacing: '.08em' }}>Members</div>
-          {MEMBERS.map(m => (
+          {members.map(m => (
             <button key={m} onClick={() => { setView('member'); setFocusMember(m); setSelectedCall(null); setNavOpen(false); }} style={{ textAlign: 'left', padding: '9px 12px', borderRadius: 8, border: `1px solid ${focusMember === m ? S.accent : 'transparent'}`, background: focusMember === m ? S.accentDim : 'transparent', color: focusMember === m ? S.accent : S.text2, fontSize: 13, cursor: 'pointer', fontFamily: "'DM Sans', sans-serif" }}>👤 {m}</button>
           ))}
           <div style={{ flex: 1 }} />
-          <DownloadReportBtn csvData={csvData} callEdits={callEdits} assignments={assignments} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment} showToast={showToast} />
+          <DownloadReportBtn csvData={csvData} callEdits={callEdits} assignments={assignments} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment} showToast={showToast} members={members} />
         </div>
 
         <div style={{ flex: 1, overflowY: 'auto' }}>
-          {view === 'overview' && <AdminOverview csvData={csvData} callEdits={callEdits} assignments={assignments} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment} onSelectMember={m => { setFocusMember(m); setView('member'); }} />}
+          {view === 'overview' && <AdminOverview csvData={csvData} callEdits={callEdits} assignments={assignments} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment} onSelectMember={m => { setFocusMember(m); setView('member'); }} members={members} />}
           {view === 'member' && focusMember && <AdminMemberView key={focusMember} member={focusMember} csvData={csvData} callEdits={callEdits} assignments={assignments} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment} saveEdits={saveEdits} selectedCall={selectedCall} setSelectedCall={setSelectedCall} showToast={showToast} />}
-          {view === 'assign' && <AssignView csvData={csvData} callEdits={callEdits} assignments={assignments} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment} saveAssignments={saveAssignments} showToast={showToast} />}
+          {view === 'assign' && <AssignView csvData={csvData} callEdits={callEdits} assignments={assignments} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment} saveAssignments={saveAssignments} showToast={showToast} members={members} />}
           {view === 'sheets' && <SheetsView sheets={sheets} currentSheetId={csvData?.sheetId} onCSV={onCSV} user={user} showToast={showToast} loadSheet={loadSheet} deleteSheet={deleteSheet} />}
-          {view === 'settings' && <SettingsView pins={pins} onPinChange={onPinChange} showToast={showToast} />}
+          {view === 'settings' && <SettingsView pins={pins} onPinChange={onPinChange} showToast={showToast} admins={admins} members={members} onMembersChange={onMembersChange} onAdminsChange={onAdminsChange} />}
         </div>
       </div>
     </div>
@@ -858,7 +864,7 @@ function CallDetail({ row, csvData, callEdits, effectiveStatus, saveEdits, showT
 }
 
 // ─── ADMIN OVERVIEW ────────────────────────────────────────────────────────────
-function AdminOverview({ csvData, callEdits, assignments, effectiveStatus, effectiveAssignment, onSelectMember }) {
+function AdminOverview({ csvData, callEdits, assignments, effectiveStatus, effectiveAssignment, onSelectMember, members }) {
   const isMobile = useIsMobile();
   const [period, setPeriod] = useState('month');
   const [filterDate, setFilterDate] = useState(today());
@@ -915,7 +921,7 @@ function AdminOverview({ csvData, callEdits, assignments, effectiveStatus, effec
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 16 }}>
-        {MEMBERS.map(m => {
+        {members.map(m => {
           const allRows = csvData ? csvData.rows.filter(r => { const a = effectiveAssignment(r); return a && a.member === m; }) : [];
           const done = allRows.filter(r => effectiveStatus(r) === 'Yes').length;
           const late = allRows.filter(r => isLate(effectiveAssignment(r)?.date, effectiveStatus(r))).length;
@@ -979,8 +985,8 @@ function AdminMemberView({ member, csvData, callEdits, assignments, effectiveSta
 }
 
 // ─── ASSIGN VIEW ──────────────────────────────────────────────────────────────
-function AssignView({ csvData, callEdits, assignments, effectiveStatus, effectiveAssignment, saveAssignments, showToast }) {
-  const [selectedMember, setSelectedMember] = useState(MEMBERS[0]);
+function AssignView({ csvData, callEdits, assignments, effectiveStatus, effectiveAssignment, saveAssignments, showToast, members }) {
+  const [selectedMember, setSelectedMember] = useState(null);
   const [assignDate, setAssignDate] = useState(today());
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState(new Set());
@@ -999,6 +1005,7 @@ function AssignView({ csvData, callEdits, assignments, effectiveStatus, effectiv
 
   const assignSelected = async () => {
     if (selected.size === 0) { showToast('Select at least one call', 'err'); return; }
+    if (!selectedMember) { showToast('Select a member first', 'err'); return; }
     const newAss = { ...assignments };
     selected.forEach(idx => { newAss[idx] = { member: selectedMember, date: assignDate }; });
     await saveAssignments(newAss);
@@ -1013,8 +1020,9 @@ function AssignView({ csvData, callEdits, assignments, effectiveStatus, effectiv
       <div style={{ display: 'flex', gap: 12, marginBottom: 18, flexWrap: 'wrap', alignItems: 'flex-end' }}>
         <div>
           <span style={lbl()}>Assign to</span>
-          <select value={selectedMember} onChange={e => setSelectedMember(e.target.value)} style={sel({ width: 'auto' })}>
-            {MEMBERS.map(m => <option key={m} value={m}>{m}</option>)}
+          <select value={selectedMember || ''} onChange={e => setSelectedMember(e.target.value)} style={sel({ width: 'auto' })}>
+            <option value="">Select member…</option>
+            {members.map(m => <option key={m} value={m}>{m}</option>)}
           </select>
         </div>
         <div>
@@ -1060,25 +1068,127 @@ function AssignView({ csvData, callEdits, assignments, effectiveStatus, effectiv
 }
 
 // ─── SETTINGS VIEW ────────────────────────────────────────────────────────────
-function SettingsView({ pins, onPinChange, showToast }) {
+function SettingsView({ pins, onPinChange, showToast, admins, members, onMembersChange, onAdminsChange }) {
   const [newPins, setNewPins] = useState({ ...pins });
+  const [newMemberName, setNewMemberName] = useState('');
+  const [newAdminName, setNewAdminName] = useState('');
+  const [tab, setTab] = useState('pins');
   const isMobile = useIsMobile();
+
+  const addMember = async () => {
+    const name = newMemberName.trim();
+    if (!name) return;
+    if (members.includes(name) || admins.includes(name)) { showToast('Name already exists', 'err'); return; }
+    await onMembersChange([...members, name]);
+    setNewMemberName('');
+    showToast(`${name} added as member ✓`);
+  };
+
+  const removeMember = async (name) => {
+    if (!confirm(`Remove member "${name}"? Their assigned calls won't be deleted.`)) return;
+    await onMembersChange(members.filter(m => m !== name));
+    showToast(`${name} removed`);
+  };
+
+  const addAdmin = async () => {
+    const name = newAdminName.trim();
+    if (!name) return;
+    if (members.includes(name) || admins.includes(name)) { showToast('Name already exists', 'err'); return; }
+    const updatedPins = { ...pins, [name]: '1234' };
+    await onAdminsChange([...admins, name]);
+    await onPinChange(name, '1234');
+    setNewAdminName('');
+    showToast(`${name} added as admin (default PIN: 1234) ✓`);
+  };
+
+  const removeAdmin = async (name) => {
+    if (admins.length <= 1) { showToast('Must have at least one admin', 'err'); return; }
+    if (!confirm(`Remove admin "${name}"?`)) return;
+    await onAdminsChange(admins.filter(a => a !== name));
+    showToast(`${name} removed`);
+  };
+
   return (
-    <div style={{ padding: isMobile ? '16px 12px' : '28px 32px', maxWidth: 400 }}>
+    <div style={{ padding: isMobile ? '16px 12px' : '28px 32px', maxWidth: 520 }}>
       <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 20 }}>Settings</div>
-      {ADMINS.map(admin => (
-        <div key={admin} style={{ ...card({ marginBottom: 14 }) }}>
-          <span style={lbl()}>{admin}'s PIN</span>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <input type="password" maxLength={8} value={newPins[admin] || ''} onChange={e => setNewPins(p => ({ ...p, [admin]: e.target.value }))} style={inp()} placeholder="Enter new PIN" />
-            <button onClick={async () => { await onPinChange(admin, newPins[admin]); showToast(`${admin}'s PIN updated ✓`); }} style={btn('accent', { whiteSpace: 'nowrap' })}>Save</button>
+
+      <div style={{ display: 'flex', gap: 6, marginBottom: 24 }}>
+        {[['pins', '🔑 PINs'], ['members', '👥 Members'], ['admins', '🔒 Admins']].map(([k, label]) => (
+          <button key={k} onClick={() => setTab(k)} style={{ padding: '7px 16px', borderRadius: 8, border: `1px solid ${tab === k ? S.accent : S.border2}`, background: tab === k ? S.accentDim : 'transparent', color: tab === k ? S.accent : S.text2, fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: "'DM Sans', sans-serif" }}>{label}</button>
+        ))}
+      </div>
+
+      {tab === 'pins' && (
+        <div>
+          {admins.map(admin => (
+            <div key={admin} style={{ ...card({ marginBottom: 14 }) }}>
+              <span style={lbl()}>{admin}'s PIN</span>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input type="password" maxLength={8} value={newPins[admin] || ''} onChange={e => setNewPins(p => ({ ...p, [admin]: e.target.value }))} style={inp()} placeholder="Enter new PIN" />
+                <button onClick={async () => { await onPinChange(admin, newPins[admin]); showToast(`${admin}'s PIN updated ✓`); }} style={btn('accent', { whiteSpace: 'nowrap' })}>Save</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === 'members' && (
+        <div>
+          <div style={{ fontSize: 13, color: S.text2, marginBottom: 16 }}>Members can log in without a PIN and see their assigned calls.</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
+            {members.map(m => (
+              <div key={m} style={{ ...card({ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }), padding: '12px 16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontSize: 20 }}>👤</span>
+                  <span style={{ fontSize: 14, fontWeight: 500 }}>{m}</span>
+                </div>
+                <button onClick={() => removeMember(m)} style={btn('danger', { fontSize: 12, padding: '5px 12px' })}>Remove</button>
+              </div>
+            ))}
+            {members.length === 0 && <div style={{ color: S.text3, fontSize: 13, textAlign: 'center', padding: '16px 0' }}>No members yet.</div>}
+          </div>
+          <div style={{ ...card() }}>
+            <span style={lbl()}>Add New Member</span>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input value={newMemberName} onChange={e => setNewMemberName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addMember()} placeholder="Full name" style={inp()} />
+              <button onClick={addMember} style={btn('accent', { whiteSpace: 'nowrap' })}>+ Add</button>
+            </div>
           </div>
         </div>
-      ))}
-      <div style={{ marginTop: 24, padding: '14px 16px', background: 'rgba(63,185,80,.07)', border: `1px solid rgba(63,185,80,.2)`, borderRadius: 10 }}>
+      )}
+
+      {tab === 'admins' && (
+        <div>
+          <div style={{ fontSize: 13, color: S.text2, marginBottom: 16 }}>Admins require a PIN to log in and have full access to all features.</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
+            {admins.map(a => (
+              <div key={a} style={{ ...card({ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }), padding: '12px 16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontSize: 20 }}>🔒</span>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 500 }}>{a}</div>
+                    <div style={{ fontSize: 11, color: S.text3 }}>Change PIN in the PINs tab</div>
+                  </div>
+                </div>
+                <button onClick={() => removeAdmin(a)} disabled={admins.length <= 1} style={btn('danger', { fontSize: 12, padding: '5px 12px', opacity: admins.length <= 1 ? 0.4 : 1 })}>Remove</button>
+              </div>
+            ))}
+          </div>
+          <div style={{ ...card() }}>
+            <span style={lbl()}>Add New Admin</span>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input value={newAdminName} onChange={e => setNewAdminName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addAdmin()} placeholder="Full name" style={inp()} />
+              <button onClick={addAdmin} style={btn('accent', { whiteSpace: 'nowrap' })}>+ Add</button>
+            </div>
+            <div style={{ fontSize: 11, color: S.text3, marginTop: 8 }}>New admins get a default PIN of 1234. Change it in the PINs tab.</div>
+          </div>
+        </div>
+      )}
+
+      <div style={{ marginTop: 28, padding: '14px 16px', background: 'rgba(63,185,80,.07)', border: `1px solid rgba(63,185,80,.2)`, borderRadius: 10 }}>
         <div style={{ fontSize: 13, color: S.success, fontWeight: 500, marginBottom: 4 }}>Cloud storage active</div>
         <div style={{ fontSize: 12, color: S.text3, lineHeight: 1.6 }}>
-          All data (sheets, assignments, edits) is stored in the cloud. Changes made by any user are visible to everyone in real time.
+          All data (sheets, assignments, edits, members) is stored in the cloud. Changes are visible to everyone in real time.
         </div>
       </div>
     </div>
@@ -1086,7 +1196,7 @@ function SettingsView({ pins, onPinChange, showToast }) {
 }
 
 // ─── DOWNLOAD REPORT ─────────────────────────────────────────────────────────
-function DownloadReportBtn({ csvData, callEdits, assignments, effectiveStatus, effectiveAssignment, showToast }) {
+function DownloadReportBtn({ csvData, callEdits, assignments, effectiveStatus, effectiveAssignment, showToast, members }) {
   const [open, setOpen] = useState(false);
   const [member, setMember] = useState('All');
   const [period, setPeriod] = useState('month');
@@ -1144,7 +1254,7 @@ function DownloadReportBtn({ csvData, callEdits, assignments, effectiveStatus, e
               <span style={lbl()}>Member</span>
               <select value={member} onChange={e => setMember(e.target.value)} style={sel()}>
                 <option value="All">All members</option>
-                {MEMBERS.map(m => <option key={m} value={m}>{m}</option>)}
+                {(members || []).map(m => <option key={m} value={m}>{m}</option>)}
               </select>
             </div>
             <div>
