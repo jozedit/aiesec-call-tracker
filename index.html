@@ -94,20 +94,10 @@ function isLate(assignedDate, status) {
 
 // ─── CLOUD API ───────────────────────────────────────────────────────────────
 async function apiGetSheets() {
-  try {
-    const r = await fetch('/api/sheets');
-    const ct = r.headers.get('content-type') || '';
-    if (!r.ok || !ct.includes('application/json')) return [];
-    return r.json();
-  } catch { return []; }
+  try { const r = await fetch('/api/sheets'); return r.ok ? r.json() : []; } catch { return []; }
 }
 async function apiGetSheet(id) {
-  try {
-    const r = await fetch(`/api/sheets/${id}`);
-    const ct = r.headers.get('content-type') || '';
-    if (!r.ok || !ct.includes('application/json')) return null;
-    return r.json();
-  } catch { return null; }
+  try { const r = await fetch(`/api/sheets/${id}`); return r.ok ? r.json() : null; } catch { return null; }
 }
 async function apiCreateSheet(name, csvData, createdBy, rowCount) {
   try {
@@ -124,9 +114,7 @@ async function apiDeleteSheet(id) {
 async function apiGetSheetState(sheetId) {
   try {
     const r = await fetch(`/api/sheets/${sheetId}/state`);
-    const ct = r.headers.get('content-type') || '';
-    if (!r.ok || !ct.includes('application/json')) return { callEdits: {}, assignments: {} };
-    return r.json();
+    return r.ok ? r.json() : { callEdits: {}, assignments: {} };
   } catch { return { callEdits: {}, assignments: {} }; }
 }
 async function apiSaveSheetState(sheetId, data) {
@@ -138,12 +126,7 @@ async function apiSaveSheetState(sheetId, data) {
   } catch {}
 }
 async function apiGetSettings() {
-  try {
-    const r = await fetch('/api/settings');
-    const ct = r.headers.get('content-type') || '';
-    if (!r.ok || !ct.includes('application/json')) return {};
-    return r.json();
-  } catch { return {}; }
+  try { const r = await fetch('/api/settings'); return r.ok ? r.json() : {}; } catch { return {}; }
 }
 async function apiSaveSettings(data) {
   try {
@@ -284,34 +267,30 @@ function App() {
   useEffect(() => {
     (async () => {
       setLoading(true);
-      const timeout = new Promise(resolve => setTimeout(resolve, 8000));
-      const load = (async () => {
-        const [settings, sheetList] = await Promise.all([apiGetSettings(), apiGetSheets()]);
-        if (settings.pins) setPins(p => ({ ...p, ...settings.pins }));
-        if (Array.isArray(settings.members)) setMembers(settings.members);
-        if (Array.isArray(settings.admins)) setAdmins(settings.admins);
-        setSheets(sheetList);
+      const [settings, sheetList] = await Promise.all([apiGetSettings(), apiGetSheets()]);
+      if (settings.pins) setPins(p => ({ ...p, ...settings.pins }));
+      if (Array.isArray(settings.members)) setMembers(settings.members);
+      if (Array.isArray(settings.admins)) setAdmins(settings.admins);
+      setSheets(sheetList);
 
-        let targetId = settings.activeSheetId || null;
-        if (!targetId || !sheetList.some(s => s.id === targetId)) {
-          if (sheetList.length > 0) {
-            const sorted = [...sheetList].sort((a, b) => b.id - a.id);
-            targetId = sorted[0].id;
-          }
+      let targetId = settings.activeSheetId || null;
+      if (!targetId || !sheetList.some(s => s.id === targetId)) {
+        if (sheetList.length > 0) {
+          const sorted = [...sheetList].sort((a, b) => b.id - a.id);
+          targetId = sorted[0].id;
         }
-        if (targetId) {
-          const [full, state] = await Promise.all([apiGetSheet(targetId), apiGetSheetState(targetId)]);
-          if (full) {
-            const parsed = parseCSVText(full.csvData);
-            if (parsed) setCsvData({ ...parsed, sheetName: full.name, sheetId: full.id });
-          }
-          if (state) {
-            setCallEdits(state.callEdits || {});
-            setAssignments(state.assignments || {});
-          }
+      }
+      if (targetId) {
+        const [full, state] = await Promise.all([apiGetSheet(targetId), apiGetSheetState(targetId)]);
+        if (full) {
+          const parsed = parseCSVText(full.csvData);
+          if (parsed) setCsvData({ ...parsed, sheetName: full.name, sheetId: full.id });
         }
-      })();
-      await Promise.race([load, timeout]);
+        if (state) {
+          setCallEdits(state.callEdits || {});
+          setAssignments(state.assignments || {});
+        }
+      }
       setLoading(false);
     })();
   }, []);
