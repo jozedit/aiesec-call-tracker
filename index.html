@@ -284,7 +284,7 @@ function App() {
   useEffect(() => {
     (async () => {
       setLoading(true);
-      const timeout = new Promise(resolve => setTimeout(resolve, 8000));
+      const timeout = new Promise(resolve => setTimeout(resolve, 20000));
       const load = (async () => {
         const [settings, sheetList] = await Promise.all([apiGetSettings(), apiGetSheets()]);
         if (settings.pins) setPins(p => ({ ...p, ...settings.pins }));
@@ -292,7 +292,7 @@ function App() {
         if (Array.isArray(settings.admins)) setAdmins(settings.admins);
         setSheets(sheetList);
 
-        let targetId = settings.activeSheetId || null;
+        let targetId = settings.activeSheetId ? Number(settings.activeSheetId) : null;
         if (!targetId || !sheetList.some(s => s.id === targetId)) {
           if (sheetList.length > 0) {
             const sorted = [...sheetList].sort((a, b) => b.id - a.id);
@@ -338,6 +338,7 @@ function App() {
         if (sheet) {
           setSheets(prev => [...prev.filter(s => s.id !== sheet.id), { id: sheet.id, name: sheet.name, rowCount: sheet.rowCount, createdBy: sheet.createdBy, createdAt: sheet.createdAt }]);
           setCsvData(prev => prev ? { ...prev, sheetName: sheet.name, sheetId: sheet.id } : null);
+          apiSaveSettings({ activeSheetId: sheet.id });
         }
       });
     }
