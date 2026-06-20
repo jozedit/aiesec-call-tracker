@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { Analytics } from '@vercel/analytics/react'
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 const MEMBERS = ['Aya', 'Nada', 'Lilian']
@@ -410,6 +411,8 @@ export default function App() {
           {toast.msg}
         </div>
       )}
+
+      <Analytics />
     </div>
   )
 }
