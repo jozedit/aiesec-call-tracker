@@ -1,0 +1,1413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AIESEC Call Tracker</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0d1117; font-family: 'DM Sans', sans-serif; -webkit-font-smoothing: antialiased; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+    input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.5); }
+    select option { background: #161b22; color: #e6edf3; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ─── CONSTANTS ───────────────────────────────────────────────────────────────
+const DEFAULT_MEMBERS = ['Aya', 'Nada', 'Lilian'];
+const DEFAULT_ADMINS = ['Joseph', 'Askar'];
+const DEFAULT_PINS = { Joseph: '1234', Askar: '1234' };
+const STATUS_OPTIONS = ['Yes', 'No Answer', 'Out of Service', 'Busy'];
+const INTEREST_OPTIONS = ['', 'Yes', 'No', "Don't Call Me Again"];
+
+const COL_ALIASES = {
+  name: ['name', 'full name', 'fullname', 'lead name'],
+  phone: ['phone', 'phone number', 'mobile', 'number', 'tel'],
+  personStatus: ['person status', 'status', 'personstatus'],
+  program: ['program', 'programme'],
+  gender: ['gender', 'sex'],
+  assignedTo: ['assigned to', 'assignedto', 'assigned'],
+  contactStatus: ['contact status', 'contactstatus', 'call status'],
+  interested: ['interested', 'interest'],
+  comments: ['comments', 'comment', 'notes', 'note'],
+};
+
+function normalizeHeader(h) { return h.trim().toLowerCase().replace(/\s+/g, ' '); }
+function mapHeaders(headers) {
+  const norm = headers.map(normalizeHeader);
+  const col = {};
+  for (const [key, aliases] of Object.entries(COL_ALIASES)) {
+    col[key] = null;
+    for (const alias of aliases) {
+      const idx = norm.indexOf(alias);
+      if (idx !== -1) { col[key] = idx; break; }
+    }
+  }
+  return col;
+}
+function getCol(raw, col) {
+  if (col === null || col === undefined) return '';
+  return (raw[col] || '').trim();
+}
+
+function parseCSVText(text) {
+  const parseLine = (line) => {
+    const cols = []; let cur = ''; let inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') { inQ = !inQ; }
+      else if (c === ',' && !inQ) { cols.push(cur.trim()); cur = ''; }
+      else { cur += c; }
+    }
+    cols.push(cur.trim());
+    return cols;
+  };
+  const lines = text.trim().split('\n');
+  if (lines.length < 2) return null;
+  const headers = parseLine(lines[0]);
+  const col = mapHeaders(headers);
+  const rows = lines.slice(1).map((l, i) => ({ _idx: i, _raw: parseLine(l) }));
+  return { headers, col, rows };
+}
+
+function today() { return new Date().toISOString().slice(0, 10); }
+function formatDate(d) {
+  if (!d) return '';
+  const dt = new Date(d + 'T00:00:00');
+  return dt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+function isLate(assignedDate, status) {
+  if (!assignedDate) return false;
+  if (status === 'Yes') return false;
+  return assignedDate < today();
+}
+
+// ─── CLOUD API ───────────────────────────────────────────────────────────────
+async function apiGetSheets() {
+  try {
+    const r = await fetch('/api/sheets');
+    const ct = r.headers.get('content-type') || '';
+    if (!r.ok || !ct.includes('application/json')) return [];
+    return r.json();
+  } catch { return []; }
+}
+async function apiGetSheet(id) {
+  try {
+    const r = await fetch(`/api/sheets/${id}`);
+    const ct = r.headers.get('content-type') || '';
+    if (!r.ok || !ct.includes('application/json')) return null;
+    return r.json();
+  } catch { return null; }
+}
+async function apiCreateSheet(name, csvData, createdBy, rowCount) {
+  try {
+    const r = await fetch('/api/sheets', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, csvData, createdBy, rowCount }),
+    });
+    return r.ok ? r.json() : null;
+  } catch { return null; }
+}
+async function apiDeleteSheet(id) {
+  try { await fetch(`/api/sheets/${id}`, { method: 'DELETE' }); } catch {}
+}
+async function apiGetSheetState(sheetId) {
+  try {
+    const r = await fetch(`/api/sheets/${sheetId}/state`);
+    const ct = r.headers.get('content-type') || '';
+    if (!r.ok || !ct.includes('application/json')) return { callEdits: {}, assignments: {} };
+    return r.json();
+  } catch { return { callEdits: {}, assignments: {} }; }
+}
+async function apiSaveSheetState(sheetId, data) {
+  try {
+    await fetch(`/api/sheets/${sheetId}/state`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  } catch {}
+}
+async function apiGetSettings() {
+  try {
+    const r = await fetch('/api/settings');
+    const ct = r.headers.get('content-type') || '';
+    if (!r.ok || !ct.includes('application/json')) return {};
+    return r.json();
+  } catch { return {}; }
+}
+async function apiSaveSettings(data) {
+  try {
+    await fetch('/api/settings', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  } catch {}
+}
+
+// ─── STYLES ──────────────────────────────────────────────────────────────────
+const S = {
+  bg: '#0d1117', surface: '#161b22', surface2: '#1c2330',
+  border: 'rgba(255,255,255,0.08)', border2: 'rgba(255,255,255,0.14)',
+  accent: '#00c9a7', accentDim: 'rgba(0,201,167,0.12)',
+  text: '#e6edf3', text2: '#8b949e', text3: '#484f58',
+  danger: '#f85149', warn: '#d29922', success: '#3fb950', blue: '#58a6ff',
+  purple: '#bc8cff',
+};
+
+const btn = (variant = 'default', extra = {}) => ({
+  fontFamily: "'DM Sans', sans-serif", cursor: 'pointer', border: 'none',
+  borderRadius: 9, fontSize: 13, fontWeight: 500, transition: 'all .15s',
+  display: 'inline-flex', alignItems: 'center', gap: 6, padding: '9px 16px',
+  ...(variant === 'accent' ? { background: S.accent, color: '#000' } :
+      variant === 'ghost'  ? { background: 'transparent', color: S.text2, border: `1px solid ${S.border2}` } :
+      variant === 'danger' ? { background: 'rgba(248,81,73,.15)', color: S.danger, border: `1px solid rgba(248,81,73,.3)` } :
+                             { background: S.surface2, color: S.text, border: `1px solid ${S.border2}` }),
+  ...extra,
+});
+
+const card = (extra = {}) => ({
+  background: S.surface, border: `1px solid ${S.border}`,
+  borderRadius: 12, padding: '16px 18px', ...extra,
+});
+
+const inp = (extra = {}) => ({
+  background: S.bg, border: `1px solid ${S.border2}`, borderRadius: 8,
+  color: S.text, fontFamily: "'DM Sans', sans-serif", fontSize: 13,
+  padding: '9px 12px', outline: 'none', width: '100%', ...extra,
+});
+
+const sel = (extra = {}) => ({
+  ...inp(extra), cursor: 'pointer', appearance: 'none',
+  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b949e' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,
+  backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center',
+  paddingRight: 28,
+});
+
+const lbl = (extra = {}) => ({
+  fontSize: 11, fontWeight: 500, letterSpacing: '.08em',
+  color: S.text3, textTransform: 'uppercase', marginBottom: 7, display: 'block', ...extra,
+});
+
+// ─── BADGE ───────────────────────────────────────────────────────────────────
+function StatusBadge({ status }) {
+  const map = {
+    'Yes':                 { bg: 'rgba(63,185,80,.15)',   color: S.success },
+    'No Answer':           { bg: 'rgba(88,166,255,.12)',  color: S.blue },
+    'Out of Service':      { bg: 'rgba(210,153,34,.15)',  color: S.warn },
+    'Busy':                { bg: 'rgba(188,140,255,.15)', color: S.purple },
+    "Don't Call Me Again": { bg: 'rgba(248,81,73,.12)',   color: S.danger },
+    'Late':                { bg: 'rgba(248,81,73,.18)',   color: S.danger },
+  };
+  const s = map[status] || { bg: S.surface2, color: S.text2 };
+  return <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 999, letterSpacing: '.04em', background: s.bg, color: s.color }}>{status || '—'}</span>;
+}
+
+// ─── MINI CHART ──────────────────────────────────────────────────────────────
+function MiniBarChart({ data }) {
+  if (!data || data.length === 0) return <div style={{ color: S.text3, fontSize: 13, padding: '20px 0', textAlign: 'center' }}>No data for this period.</div>;
+  const maxVal = Math.max(...data.map(d => d.assigned), 1);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 8 }}>
+      {data.map((d, i) => (
+        <div key={i}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: S.text2, marginBottom: 4 }}>
+            <span>{d.label}</span>
+            <span style={{ display: 'flex', gap: 12 }}>
+              <span style={{ color: S.success }}>✓ {d.done}</span>
+              <span style={{ color: S.danger }}>⚠ {d.late}</span>
+              <span style={{ color: S.text3 }}>∑ {d.assigned}</span>
+            </span>
+          </div>
+          <div style={{ background: S.surface2, borderRadius: 999, height: 6, overflow: 'hidden' }}>
+            <div style={{ display: 'flex', height: '100%' }}>
+              <div style={{ width: `${(d.done / maxVal) * 100}%`, background: S.success, transition: 'width .4s' }} />
+              <div style={{ width: `${(d.late / maxVal) * 100}%`, background: S.danger, transition: 'width .4s' }} />
+            </div>
+          </div>
+        </div>
+      ))}
+      <div style={{ display: 'flex', gap: 16, marginTop: 4 }}>
+        {[['Done', S.success], ['Late', S.danger], ['Assigned', S.text3]].map(([l, c]) => (
+          <span key={l} style={{ fontSize: 11, color: c, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: c, display: 'inline-block' }} />{l}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── MOBILE HOOK ─────────────────────────────────────────────────────────────
+function useIsMobile() {
+  const [mob, setMob] = useState(false);
+  useEffect(() => {
+    const h = () => setMob(window.innerWidth < 640);
+    h();
+    window.addEventListener('resize', h);
+    return () => window.removeEventListener('resize', h);
+  }, []);
+  return mob;
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+function App() {
+  const [screen, setScreen] = useState('welcome');
+  const [currentUser, setCurrentUser] = useState(null);
+  const [csvData, setCsvData] = useState(null);
+  const [callEdits, setCallEdits] = useState({});
+  const [assignments, setAssignments] = useState({});
+  const [pins, setPins] = useState({ ...DEFAULT_PINS });
+  const [members, setMembers] = useState(DEFAULT_MEMBERS);
+  const [admins, setAdmins] = useState(DEFAULT_ADMINS);
+  const [loading, setLoading] = useState(true);
+  const [toast, setToast] = useState(null);
+  const [sheets, setSheets] = useState([]);
+  const toastTimer = useRef(null);
+  const isMobile = useIsMobile();
+
+  const showToast = useCallback((msg, type = 'ok') => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast({ msg, type });
+    toastTimer.current = setTimeout(() => setToast(null), 2500);
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      const timeout = new Promise(resolve => setTimeout(resolve, 20000));
+      const load = (async () => {
+        const [settings, sheetList] = await Promise.all([apiGetSettings(), apiGetSheets()]);
+        if (settings.pins) setPins(p => ({ ...p, ...settings.pins }));
+        if (Array.isArray(settings.members)) setMembers(settings.members);
+        if (Array.isArray(settings.admins)) setAdmins(settings.admins);
+        setSheets(sheetList);
+
+        let targetId = settings.activeSheetId ? Number(settings.activeSheetId) : null;
+        if (!targetId || !sheetList.some(s => s.id === targetId)) {
+          if (sheetList.length > 0) {
+            const sorted = [...sheetList].sort((a, b) => b.id - a.id);
+            targetId = sorted[0].id;
+          }
+        }
+        if (targetId) {
+          const [full, state] = await Promise.all([apiGetSheet(targetId), apiGetSheetState(targetId)]);
+          if (full) {
+            const parsed = parseCSVText(full.csvData);
+            if (parsed) setCsvData({ ...parsed, sheetName: full.name, sheetId: full.id });
+          }
+          if (state) {
+            setCallEdits(state.callEdits || {});
+            setAssignments(state.assignments || {});
+          }
+        }
+      })();
+      await Promise.race([load, timeout]);
+      setLoading(false);
+    })();
+  }, []);
+
+  const saveEdits = useCallback(async (newEdits) => {
+    setCallEdits(newEdits);
+    if (csvData?.sheetId) apiSaveSheetState(csvData.sheetId, { callEdits: newEdits, assignments });
+  }, [csvData, assignments]);
+
+  const saveAssignments = useCallback(async (newAss) => {
+    setAssignments(newAss);
+    if (csvData?.sheetId) apiSaveSheetState(csvData.sheetId, { callEdits, assignments: newAss });
+  }, [csvData, callEdits]);
+
+  const handleCSV = useCallback((text, name, uploadedBy) => {
+    const parsed = parseCSVText(text);
+    if (!parsed) { showToast('CSV appears empty', 'err'); return; }
+    setCallEdits({});
+    setAssignments({});
+    setCsvData({ ...parsed, sheetName: name });
+    showToast(`Loaded ${parsed.rows.length} rows ✓`);
+    if (name && uploadedBy) {
+      apiCreateSheet(name, text, uploadedBy, parsed.rows.length).then(sheet => {
+        if (sheet) {
+          setSheets(prev => [...prev.filter(s => s.id !== sheet.id), { id: sheet.id, name: sheet.name, rowCount: sheet.rowCount, createdBy: sheet.createdBy, createdAt: sheet.createdAt }]);
+          setCsvData(prev => prev ? { ...prev, sheetName: sheet.name, sheetId: sheet.id } : null);
+          apiSaveSettings({ activeSheetId: sheet.id });
+        }
+      });
+    }
+  }, [showToast]);
+
+  const loadSheet = useCallback(async (id) => {
+    const [full, state] = await Promise.all([apiGetSheet(id), apiGetSheetState(id)]);
+    if (!full) { showToast('Failed to load sheet', 'err'); return; }
+    const parsed = parseCSVText(full.csvData);
+    if (!parsed) { showToast('Sheet data invalid', 'err'); return; }
+    setCsvData({ ...parsed, sheetName: full.name, sheetId: full.id });
+    setCallEdits(state?.callEdits || {});
+    setAssignments(state?.assignments || {});
+    apiSaveSettings({ activeSheetId: id });
+    showToast(`Loaded "${full.name}" (${parsed.rows.length} rows) ✓`);
+  }, [showToast]);
+
+  const deleteSheet = useCallback(async (id) => {
+    await apiDeleteSheet(id);
+    setSheets(prev => prev.filter(s => s.id !== id));
+    if (csvData?.sheetId === id) {
+      setCsvData(null);
+      setCallEdits({});
+      setAssignments({});
+    }
+    showToast('Sheet deleted');
+  }, [csvData, showToast]);
+
+  const effectiveStatus = useCallback((row) => {
+    const e = callEdits[row._idx];
+    if (e?.contactStatus) return e.contactStatus;
+    return getCol(row._raw, csvData?.col?.contactStatus) || '';
+  }, [callEdits, csvData]);
+
+  const effectiveAssignment = useCallback((row) => {
+    const a = assignments[row._idx];
+    if (a) return a;
+    if (!csvData) return null;
+    const at = getCol(row._raw, csvData.col.assignedTo);
+    if (at) return { member: at, date: '' };
+    return null;
+  }, [assignments, csvData]);
+
+  const handleLogin = useCallback((user, pin) => {
+    if (admins.includes(user)) {
+      if (pin !== (pins[user] || DEFAULT_PINS[user])) { showToast('Wrong PIN', 'err'); return; }
+      setCurrentUser(user); setScreen('admin');
+    } else {
+      setCurrentUser(user); setScreen('member');
+    }
+  }, [pins, admins, showToast]);
+
+  if (loading) return (
+    <div style={{ background: S.bg, minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: S.text2, fontFamily: "'DM Sans', sans-serif" }}>
+      <span style={{ fontSize: 14 }}>Loading…</span>
+    </div>
+  );
+
+  return (
+    <div style={{ background: S.bg, minHeight: '100vh', fontFamily: "'DM Sans', sans-serif", color: S.text, position: 'relative' }}>
+      {screen === 'welcome' && <WelcomeScreen onLogin={handleLogin} csvData={csvData} members={members} admins={admins} />}
+      {screen === 'member' && currentUser && (
+        <MemberScreen
+          isMobile={isMobile} user={currentUser} csvData={csvData} callEdits={callEdits}
+          assignments={assignments} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment}
+          saveEdits={saveEdits} showToast={showToast}
+          onLogout={() => { setCurrentUser(null); setScreen('welcome'); }}
+        />
+      )}
+      {screen === 'admin' && currentUser && (
+        <AdminScreen
+          isMobile={isMobile} user={currentUser} csvData={csvData} callEdits={callEdits}
+          assignments={assignments} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment}
+          saveEdits={saveEdits} saveAssignments={saveAssignments} onCSV={handleCSV}
+          showToast={showToast} pins={pins} sheets={sheets} members={members} admins={admins}
+          onPinChange={async (u, p) => { const np = { ...pins, [u]: p }; setPins(np); await apiSaveSettings({ pins: np }); }}
+          onLogout={() => { setCurrentUser(null); setScreen('welcome'); }}
+          loadSheet={loadSheet} deleteSheet={deleteSheet}
+          onMembersChange={async (newMembers) => { setMembers(newMembers); await apiSaveSettings({ members: newMembers }); }}
+          onAdminsChange={async (newAdmins) => { setAdmins(newAdmins); await apiSaveSettings({ admins: newAdmins }); }}
+        />
+      )}
+      {toast && (
+        <div style={{ position: 'fixed', bottom: isMobile ? 16 : 24, right: isMobile ? 12 : 24, left: isMobile ? 12 : 'auto', background: S.surface, border: `1px solid ${toast.type === 'err' ? S.danger : S.accent}`, color: toast.type === 'err' ? S.danger : S.accent, padding: '11px 20px', borderRadius: 10, fontSize: 13, fontWeight: 500, zIndex: 9999, pointerEvents: 'none', textAlign: 'center' }}>
+          {toast.msg}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── WELCOME SCREEN ───────────────────────────────────────────────────────────
+function WelcomeScreen({ onLogin, csvData, members, admins }) {
+  const [step, setStep] = useState('pick');
+  const [selected, setSelected] = useState(null);
+  const [pin, setPin] = useState('');
+  const [pinError, setPinError] = useState(false);
+
+  const handlePick = (user) => {
+    setSelected(user);
+    if (admins.includes(user)) setStep('pin');
+    else onLogin(user, null);
+  };
+
+  const handlePin = () => {
+    setPinError(false);
+    onLogin(selected, pin);
+    setPinError(true);
+    setPin('');
+  };
+
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+      <div style={{ marginBottom: 40, textAlign: 'center' }}>
+        <div style={{ background: S.accent, color: '#000', fontWeight: 700, fontSize: 13, letterSpacing: '.1em', padding: '5px 14px', borderRadius: 8, display: 'inline-block', marginBottom: 12 }}>AIESEC</div>
+        <div style={{ fontSize: 26, fontWeight: 600, color: S.text, marginBottom: 6 }}>Call Tracker</div>
+        <div style={{ fontSize: 14, color: S.text2 }}>Select your name to begin</div>
+        {csvData?.sheetName && (
+          <div style={{ marginTop: 10, fontSize: 12, color: S.accent }}>📋 Active sheet: {csvData.sheetName} ({csvData.rows.length} rows)</div>
+        )}
+      </div>
+
+      {step === 'pick' && (
+        <div style={{ width: '100%', maxWidth: 380 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 16 }}>
+            {members.map(m => (
+              <button key={m} onClick={() => handlePick(m)} style={{ ...btn('ghost'), justifyContent: 'center', padding: '18px 8px', flexDirection: 'column', gap: 8, borderRadius: 12, fontSize: 15, fontWeight: 500, color: S.text }}>
+                <span style={{ fontSize: 26 }}>👤</span>{m}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, color: S.text3, textAlign: 'center', marginBottom: 10, letterSpacing: '.05em', textTransform: 'uppercase' }}>— Admin —</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            {admins.map(m => (
+              <button key={m} onClick={() => handlePick(m)} style={{ ...btn('ghost'), justifyContent: 'center', padding: '18px 8px', flexDirection: 'column', gap: 8, borderRadius: 12, fontSize: 15, fontWeight: 500, color: S.text }}>
+                <span style={{ fontSize: 26 }}>🔒</span>{m}
+              </button>
+            ))}
+          </div>
+          <div style={{ marginTop: 16, fontSize: 12, color: S.text3, textAlign: 'center' }}>
+            Admins can upload and manage sheets after logging in.
+          </div>
+        </div>
+      )}
+
+      {step === 'pin' && (
+        <div style={{ width: '100%', maxWidth: 300, textAlign: 'center' }}>
+          <div style={{ fontSize: 18, fontWeight: 500, marginBottom: 6 }}>{selected}</div>
+          <div style={{ fontSize: 13, color: S.text2, marginBottom: 20 }}>Enter your PIN</div>
+          <input type="password" maxLength={8} value={pin} onChange={e => setPin(e.target.value)} onKeyDown={e => e.key === 'Enter' && handlePin()} style={{ ...inp(), textAlign: 'center', fontSize: 22, letterSpacing: 8, marginBottom: 12 }} placeholder="••••" />
+          {pinError && <div style={{ fontSize: 12, color: S.danger, marginBottom: 10 }}>Incorrect PIN</div>}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={() => { setStep('pick'); setPin(''); setPinError(false); }} style={btn('ghost', { flex: 1, justifyContent: 'center' })}>Back</button>
+            <button onClick={handlePin} style={btn('accent', { flex: 1, justifyContent: 'center' })}>Enter →</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── MEMBER SCREEN ────────────────────────────────────────────────────────────
+function MemberScreen({ isMobile, user, csvData, callEdits, assignments, effectiveStatus, effectiveAssignment, saveEdits, showToast, onLogout }) {
+  const [tab, setTab] = useState('today');
+  const [todayFilter, setTodayFilter] = useState('all');
+  const [filterDate, setFilterDate] = useState(today());
+  const [search, setSearch] = useState('');
+  const [selectedCall, setSelectedCall] = useState(null);
+  const [mobileView, setMobileView] = useState('list');
+
+  const myRows = csvData ? csvData.rows.filter(r => {
+    const a = effectiveAssignment(r);
+    return a && a.member === user;
+  }) : [];
+
+  const lateRows = myRows.filter(r => isLate(effectiveAssignment(r)?.date, effectiveStatus(r)));
+  const todayOnlyRows = myRows.filter(r => effectiveAssignment(r)?.date === today());
+
+  const todayRows = todayFilter === 'today' ? todayOnlyRows
+    : todayFilter === 'late' ? lateRows
+    : todayFilter === 'date' ? myRows.filter(r => effectiveAssignment(r)?.date === filterDate)
+    : [...lateRows, ...todayOnlyRows];
+
+  const allRows = search
+    ? myRows.filter(r => getCol(r._raw, csvData?.col?.name).toLowerCase().includes(search.toLowerCase()) || getCol(r._raw, csvData?.col?.phone).includes(search))
+    : myRows;
+
+  const done = myRows.filter(r => effectiveStatus(r) === 'Yes').length;
+  const late = lateRows.length;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: isMobile ? '10px 12px' : '12px 24px', borderBottom: `1px solid ${S.border}`, background: S.surface, gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <span style={{ background: S.accent, color: '#000', fontWeight: 700, fontSize: 11, padding: '3px 8px', borderRadius: 6, flexShrink: 0 }}>AIESEC</span>
+          <span style={{ fontWeight: 500, fontSize: isMobile ? 13 : 15, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{user}</span>
+          {!isMobile && csvData?.sheetName && <span style={{ fontSize: 11, color: S.text3, background: S.surface2, padding: '2px 8px', borderRadius: 5, flexShrink: 0 }}>📋 {csvData.sheetName}</span>}
+        </div>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+          {isMobile
+            ? <span style={{ fontSize: 11, color: S.text2 }}>{done}✓ {late > 0 && <span style={{ color: S.danger }}>{late}⚠</span>}</span>
+            : <span style={{ fontSize: 12, color: S.text2 }}>{todayRows.length} today · {done} done · <span style={{ color: S.danger }}>{late} late</span></span>}
+          <button onClick={onLogout} style={btn('ghost', { fontSize: 11, padding: '5px 10px' })}>Log out</button>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+        <div style={{ width: isMobile ? '100%' : 280, minWidth: isMobile ? 0 : 280, display: isMobile && mobileView === 'detail' ? 'none' : 'flex', background: S.surface, borderRight: `1px solid ${S.border}`, flexDirection: 'column', overflow: 'hidden' }}>
+          <div style={{ display: 'flex', gap: 6, padding: '12px 12px 8px' }}>
+            {[['today', 'Today'], ['all', 'All Calls']].map(([k, label]) => (
+              <button key={k} onClick={() => { setTab(k); setSelectedCall(null); }} style={{ flex: 1, padding: '7px 6px', borderRadius: 8, border: `1px solid ${tab === k ? S.accent : S.border}`, background: tab === k ? S.accentDim : 'transparent', color: tab === k ? S.accent : S.text2, fontSize: 12, fontWeight: 500, cursor: 'pointer', fontFamily: "'DM Sans', sans-serif" }}>{label}</button>
+            ))}
+          </div>
+          {tab === 'today' && (
+            <div style={{ padding: '0 12px 8px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                {[['all', 'Today + Late'], ['today', 'Today'], ['late', 'Late'], ['date', 'By Date']].map(([k, label]) => (
+                  <button key={k} onClick={() => setTodayFilter(k)} style={{ padding: '4px 9px', borderRadius: 6, border: `1px solid ${todayFilter === k ? S.accent : S.border}`, background: todayFilter === k ? S.accentDim : 'transparent', color: todayFilter === k ? S.accent : S.text2, fontSize: 11, fontWeight: 500, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: "'DM Sans', sans-serif" }}>
+                    {label}
+                    {k === 'late' && lateRows.length > 0 && <span style={{ background: S.danger, color: '#fff', borderRadius: 999, fontSize: 10, padding: '0 5px', lineHeight: '16px' }}>{lateRows.length}</span>}
+                  </button>
+                ))}
+              </div>
+              {todayFilter === 'date' && (
+                <input type="date" value={filterDate} onChange={e => setFilterDate(e.target.value)} style={{ ...inp({ fontSize: 12, padding: '5px 10px' }) }} />
+              )}
+            </div>
+          )}
+          {tab === 'all' && (
+            <div style={{ padding: '0 12px 8px' }}>
+              <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search name or number…" style={{ ...inp(), fontSize: 12, padding: '7px 10px' }} />
+            </div>
+          )}
+          <OverviewBar rows={myRows} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment} />
+          <div style={{ flex: 1, overflowY: 'auto', padding: '4px 8px' }}>
+            <CallList rows={tab === 'today' ? todayRows : allRows} csvData={csvData} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment} selectedIdx={selectedCall?._idx ?? null} onSelect={r => { setSelectedCall(r); if (isMobile) setMobileView('detail'); }} showToast={showToast} />
+          </div>
+        </div>
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '16px' : '28px 32px', display: isMobile && mobileView === 'list' ? 'none' : 'block' }}>
+          {isMobile && mobileView === 'detail' && (
+            <button onClick={() => setMobileView('list')} style={{ ...btn('ghost', { fontSize: 12, marginBottom: 16 }) }}>← Back to list</button>
+          )}
+          {selectedCall
+            ? <CallDetail row={selectedCall} csvData={csvData} callEdits={callEdits} effectiveStatus={effectiveStatus} saveEdits={saveEdits} showToast={showToast} />
+            : <EmptyState label="Select a call from the sidebar" />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── ADMIN SCREEN ─────────────────────────────────────────────────────────────
+function AdminScreen({ isMobile, user, csvData, callEdits, assignments, effectiveStatus, effectiveAssignment, saveEdits, saveAssignments, onCSV, showToast, pins, onPinChange, onLogout, sheets, loadSheet, deleteSheet, members, admins, onMembersChange, onAdminsChange }) {
+  const [view, setView] = useState('overview');
+  const [focusMember, setFocusMember] = useState(null);
+  const [selectedCall, setSelectedCall] = useState(null);
+  const [navOpen, setNavOpen] = useState(false);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 24px', borderBottom: `1px solid ${S.border}`, background: S.surface }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {isMobile && <button onClick={() => setNavOpen(o => !o)} style={{ ...btn('ghost', { padding: '5px 8px', fontSize: 16 }) }}>☰</button>}
+          <span style={{ background: S.accent, color: '#000', fontWeight: 700, fontSize: 11, padding: '3px 8px', borderRadius: 6 }}>AIESEC</span>
+          <span style={{ fontWeight: 500, fontSize: 15 }}>{user} <span style={{ color: S.text3, fontSize: 12 }}>Admin</span></span>
+          {csvData?.sheetName && <span style={{ fontSize: 11, color: S.accent, background: S.accentDim, padding: '2px 8px', borderRadius: 5, border: `1px solid ${S.accent}30` }}>📋 {csvData.sheetName}</span>}
+        </div>
+        <button onClick={onLogout} style={btn('ghost', { fontSize: 11, padding: '5px 10px' })}>Log out</button>
+      </div>
+
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+        <div style={{ width: isMobile ? (navOpen ? '100vw' : 0) : 200, minWidth: isMobile ? 0 : 200, background: S.surface, borderRight: `1px solid ${S.border}`, padding: isMobile && !navOpen ? 0 : '16px 10px', display: 'flex', flexDirection: 'column', gap: 4, overflow: 'hidden', transition: 'width .2s', position: isMobile ? 'fixed' : 'relative', top: isMobile ? 57 : 0, left: 0, bottom: 0, zIndex: isMobile ? 200 : 'auto' }}>
+          {[['overview', '📊 Overview'], ['assign', '📋 Assign Calls'], ['sheets', '🗂 Sheets'], ['settings', '⚙️ Settings']].map(([k, lbl]) => (
+            <button key={k} onClick={() => { setView(k); setFocusMember(null); setSelectedCall(null); setNavOpen(false); }} style={{ textAlign: 'left', padding: '9px 12px', borderRadius: 8, border: `1px solid ${view === k && !focusMember ? S.accent : 'transparent'}`, background: view === k && !focusMember ? S.accentDim : 'transparent', color: view === k && !focusMember ? S.accent : S.text2, fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: "'DM Sans', sans-serif" }}>{lbl}</button>
+          ))}
+          <div style={{ fontSize: 11, color: S.text3, padding: '12px 12px 4px', textTransform: 'uppercase', letterSpacing: '.08em' }}>Members</div>
+          {members.map(m => (
+            <button key={m} onClick={() => { setView('member'); setFocusMember(m); setSelectedCall(null); setNavOpen(false); }} style={{ textAlign: 'left', padding: '9px 12px', borderRadius: 8, border: `1px solid ${focusMember === m ? S.accent : 'transparent'}`, background: focusMember === m ? S.accentDim : 'transparent', color: focusMember === m ? S.accent : S.text2, fontSize: 13, cursor: 'pointer', fontFamily: "'DM Sans', sans-serif" }}>👤 {m}</button>
+          ))}
+          <div style={{ flex: 1 }} />
+          <DownloadReportBtn csvData={csvData} callEdits={callEdits} assignments={assignments} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment} showToast={showToast} members={members} />
+        </div>
+
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {view === 'overview' && <AdminOverview csvData={csvData} callEdits={callEdits} assignments={assignments} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment} onSelectMember={m => { setFocusMember(m); setView('member'); }} members={members} />}
+          {view === 'member' && focusMember && <AdminMemberView key={focusMember} member={focusMember} csvData={csvData} callEdits={callEdits} assignments={assignments} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment} saveEdits={saveEdits} selectedCall={selectedCall} setSelectedCall={setSelectedCall} showToast={showToast} />}
+          {view === 'assign' && <AssignView csvData={csvData} callEdits={callEdits} assignments={assignments} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment} saveAssignments={saveAssignments} showToast={showToast} members={members} />}
+          {view === 'sheets' && <SheetsView sheets={sheets} currentSheetId={csvData?.sheetId} onCSV={onCSV} user={user} showToast={showToast} loadSheet={loadSheet} deleteSheet={deleteSheet} />}
+          {view === 'settings' && <SettingsView pins={pins} onPinChange={onPinChange} showToast={showToast} admins={admins} members={members} onMembersChange={onMembersChange} onAdminsChange={onAdminsChange} />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── SHEETS VIEW ──────────────────────────────────────────────────────────────
+function SheetsView({ sheets, currentSheetId, onCSV, user, showToast, loadSheet, deleteSheet }) {
+  const [newName, setNewName] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [deleting, setDeleting] = useState(null);
+  const [loading, setLoading] = useState(null);
+  const fileRef = useRef(null);
+  const isMobile = useIsMobile();
+
+  const handleFile = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!newName.trim()) { showToast('Enter a sheet name first', 'err'); return; }
+    setUploading(true);
+    const reader = new FileReader();
+    reader.onload = ev => {
+      onCSV(ev.target?.result, newName.trim(), user);
+      setNewName('');
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = '';
+    };
+    reader.readAsText(file);
+  };
+
+  const handleLoad = async (id) => {
+    setLoading(id);
+    await loadSheet(id);
+    setLoading(null);
+  };
+
+  const handleDelete = async (id, name) => {
+    if (!confirm(`Delete sheet "${name}"? This cannot be undone.`)) return;
+    setDeleting(id);
+    await deleteSheet(id);
+    setDeleting(null);
+  };
+
+  const sortedSheets = [...sheets].sort((a, b) => b.id - a.id);
+
+  return (
+    <div style={{ padding: isMobile ? '16px 12px' : '28px 32px', maxWidth: 600 }}>
+      <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 6 }}>Manage Sheets</div>
+      <div style={{ fontSize: 13, color: S.text2, marginBottom: 24 }}>Upload and switch between Google Sheet exports (CSV).</div>
+
+      <div style={{ ...card({ marginBottom: 28 }) }}>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Upload New Sheet</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div>
+            <span style={lbl()}>Sheet Name</span>
+            <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="e.g. June 2026 Leads" style={inp()} />
+          </div>
+          <input type="file" accept=".csv" ref={fileRef} onChange={handleFile} style={{ display: 'none' }} />
+          <button
+            onClick={() => { if (!newName.trim()) { showToast('Enter a sheet name first', 'err'); return; } fileRef.current?.click(); }}
+            disabled={uploading}
+            style={btn('accent', { opacity: uploading ? 0.6 : 1, justifyContent: 'center' })}
+          >
+            {uploading ? 'Uploading…' : '📁 Choose CSV File & Upload'}
+          </button>
+          <div style={{ fontSize: 11, color: S.text3 }}>File → Download → CSV format from Google Sheets</div>
+        </div>
+      </div>
+
+      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Saved Sheets ({sheets.length})</div>
+      {sheets.length === 0 && (
+        <div style={{ color: S.text3, fontSize: 13, textAlign: 'center', padding: '24px 0' }}>No sheets uploaded yet.</div>
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {sortedSheets.map(sheet => {
+          const isActive = sheet.id === currentSheetId;
+          return (
+            <div key={sheet.id} style={{ ...card({ display: 'flex', alignItems: 'center', gap: 12, border: `1px solid ${isActive ? S.accent : S.border}`, background: isActive ? S.accentDim : S.surface }), padding: '12px 16px' }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                  <span style={{ fontSize: 14, fontWeight: 500 }}>{sheet.name}</span>
+                  {isActive && <span style={{ fontSize: 10, background: S.accent, color: '#000', padding: '1px 6px', borderRadius: 4, fontWeight: 700 }}>ACTIVE</span>}
+                </div>
+                <div style={{ fontSize: 11, color: S.text3 }}>
+                  {sheet.rowCount} rows · Uploaded by {sheet.createdBy} · {new Date(sheet.createdAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {!isActive && (
+                  <button onClick={() => handleLoad(sheet.id)} disabled={loading === sheet.id} style={btn('accent', { fontSize: 12, padding: '6px 12px', opacity: loading === sheet.id ? 0.6 : 1 })}>
+                    {loading === sheet.id ? '…' : 'Load'}
+                  </button>
+                )}
+                <button onClick={() => handleDelete(sheet.id, sheet.name)} disabled={deleting === sheet.id} style={btn('danger', { fontSize: 12, padding: '6px 12px', opacity: deleting === sheet.id ? 0.6 : 1 })}>
+                  {deleting === sheet.id ? '…' : '🗑'}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── OVERVIEW BAR ─────────────────────────────────────────────────────────────
+function OverviewBar({ rows, effectiveStatus, effectiveAssignment }) {
+  const done = rows.filter(r => effectiveStatus(r) === 'Yes').length;
+  const late = rows.filter(r => isLate(effectiveAssignment(r)?.date, effectiveStatus(r))).length;
+  const total = rows.length;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  return (
+    <div style={{ padding: '8px 14px 10px', borderBottom: `1px solid ${S.border}` }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: S.text2, marginBottom: 5 }}>
+        <span>{done}/{total} done</span>
+        {late > 0 && <span style={{ color: S.danger }}>⚠ {late} late</span>}
+        <span style={{ color: S.accent }}>{pct}%</span>
+      </div>
+      <div style={{ background: S.surface2, borderRadius: 999, height: 4 }}>
+        <div style={{ width: `${pct}%`, height: '100%', background: S.accent, borderRadius: 999, transition: 'width .4s' }} />
+      </div>
+    </div>
+  );
+}
+
+// ─── CALL LIST ────────────────────────────────────────────────────────────────
+function CallList({ rows, csvData, effectiveStatus, effectiveAssignment, selectedIdx, onSelect, showToast }) {
+  if (!csvData) return <div style={{ textAlign: 'center', color: S.text3, fontSize: 12, padding: 20 }}>No sheet loaded. Ask an admin to load a sheet.</div>;
+  if (rows.length === 0) return <div style={{ textAlign: 'center', color: S.text3, fontSize: 12, padding: 20 }}>No calls here.</div>;
+  return (
+    <>
+      {rows.map(row => {
+        const name = getCol(row._raw, csvData.col.name) || 'Unknown';
+        const prog = getCol(row._raw, csvData.col.program);
+        const status = effectiveStatus(row);
+        const a = effectiveAssignment(row);
+        const late = isLate(a?.date, status);
+        const sheetRow = row._idx + 2;
+        return (
+          <div key={row._idx} onClick={() => onSelect(row)} style={{ padding: '10px 11px', borderRadius: 9, cursor: 'pointer', border: `1px solid ${selectedIdx === row._idx ? S.accent : 'transparent'}`, background: selectedIdx === row._idx ? S.accentDim : 'transparent', marginBottom: 3, transition: 'all .12s' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 3 }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: S.text }}>{name}</div>
+              <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: S.text3, background: S.surface2, border: `1px solid ${S.border}`, borderRadius: 4, padding: '1px 5px', flexShrink: 0, marginLeft: 6 }}>
+                row {sheetRow}
+              </span>
+            </div>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+              {prog && <span style={{ fontSize: 10, color: S.text3 }}>{prog}</span>}
+              <StatusBadge status={late ? 'Late' : status} />
+              {csvData.sheetName && <span style={{ fontSize: 9, color: S.text3, background: S.surface2, padding: '1px 5px', borderRadius: 3 }}>{csvData.sheetName}</span>}
+            </div>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+// ─── CALL DETAIL ──────────────────────────────────────────────────────────────
+function CallDetail({ row, csvData, callEdits, effectiveStatus, saveEdits, showToast, readOnly }) {
+  const isMobile = useIsMobile();
+  if (!csvData || !row) return null;
+  const { col } = csvData;
+  const saved = callEdits[row._idx] || {};
+  const name = getCol(row._raw, col.name) || 'Unknown';
+  const phone = getCol(row._raw, col.phone) || '';
+  const program = getCol(row._raw, col.program);
+  const gender = getCol(row._raw, col.gender);
+  const personStatus = getCol(row._raw, col.personStatus);
+  const contactStatus = saved.contactStatus || getCol(row._raw, col.contactStatus) || 'Pending';
+  const interested = saved.interested !== undefined ? saved.interested : (getCol(row._raw, col.interested) ?? '');
+  const comments = saved.comments !== undefined ? saved.comments : getCol(row._raw, col.comments);
+  const isDone = saved.done || false;
+  const sheetRow = row._idx + 2;
+
+  const update = async (field, value) => {
+    if (readOnly) return;
+    const newEdits = { ...callEdits, [row._idx]: { ...(callEdits[row._idx] || {}), [field]: value } };
+    await saveEdits(newEdits);
+  };
+
+  const toggleDone = async () => {
+    if (readOnly) return;
+    const newDone = !isDone;
+    const newEdits = { ...callEdits, [row._idx]: { ...(callEdits[row._idx] || {}), done: newDone, contactStatus: newDone ? 'Yes' : (callEdits[row._idx]?.contactStatus || '') } };
+    await saveEdits(newEdits);
+    showToast(newDone ? 'Marked as contacted ✓' : 'Unmarked');
+  };
+
+  const phoneClean = phone.replace(/\s/g, '');
+  const waHref = `https://wa.me/${phone.replace(/[^0-9]/g, '')}`;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'flex-start' : 'flex-start', marginBottom: 22, gap: isMobile ? 14 : 16 }}>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+            <div style={{ fontSize: 24, fontWeight: 600 }}>{name}</div>
+            <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: S.text3, background: S.surface2, border: `1px solid ${S.border}`, borderRadius: 5, padding: '2px 7px' }}>
+              {csvData.sheetName ? `${csvData.sheetName} · row ${sheetRow}` : `row ${sheetRow}`}
+            </span>
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {personStatus && <span style={{ fontSize: 12, padding: '3px 10px', borderRadius: 999, background: S.surface2, border: `1px solid ${S.border}`, color: S.text2 }}>{personStatus}</span>}
+            {program && <span style={{ fontSize: 12, padding: '3px 10px', borderRadius: 999, background: 'rgba(88,166,255,.1)', border: `1px solid rgba(88,166,255,.3)`, color: S.blue }}>{program}</span>}
+            {gender && <span style={{ fontSize: 12, padding: '3px 10px', borderRadius: 999, background: S.surface2, border: `1px solid ${S.border}`, color: S.text2 }}>{gender}</span>}
+          </div>
+        </div>
+        {!readOnly && (
+          <div style={{ display: 'flex', flexDirection: isMobile ? 'row' : 'column', gap: 8, alignItems: isMobile ? 'center' : 'flex-end', width: isMobile ? '100%' : 'auto' }}>
+            <a href={`tel:${phoneClean}`} style={{ ...btn('accent'), textDecoration: 'none', fontSize: 14, padding: '11px 20px', flex: isMobile ? 1 : undefined, justifyContent: 'center' }}>
+              📞 Call now
+            </a>
+            <button onClick={toggleDone} style={{ ...btn(isDone ? 'default' : 'ghost', { fontSize: 12, padding: '7px 14px', borderColor: isDone ? S.success : S.border2, color: isDone ? S.success : S.text2, flex: isMobile ? 1 : undefined, justifyContent: isMobile ? 'center' : undefined }) }}>
+              {isDone ? '✓ Contacted' : 'Mark as contacted'}
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div style={{ ...card({ marginBottom: 18, display: 'flex', alignItems: 'center', gap: 14 }) }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 11, color: S.text3, textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 3 }}>Phone number</div>
+          <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 19, fontWeight: 500, color: S.accent }}>{phone || '—'}</div>
+        </div>
+        {phone && <>
+          <button onClick={() => { navigator.clipboard.writeText(phone); showToast('Copied ✓'); }} style={btn('ghost', { fontSize: 12, padding: '7px 12px' })}>Copy</button>
+          <a href={waHref} target="_blank" rel="noreferrer" style={{ ...btn('ghost', { fontSize: 12, padding: '7px 12px', textDecoration: 'none' }) }}>WhatsApp</a>
+        </>}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14, marginBottom: 14 }}>
+        <div style={card()}>
+          <span style={lbl()}>Contact Status</span>
+          <select value={contactStatus} disabled={readOnly} onChange={e => update('contactStatus', e.target.value)} style={sel()}>
+            {STATUS_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+          </select>
+        </div>
+        <div style={card()}>
+          <span style={lbl()}>Interested?</span>
+          <select value={interested} disabled={readOnly} onChange={e => update('interested', e.target.value)} style={sel()}>
+            {INTEREST_OPTIONS.map(o => <option key={o} value={o}>{o || '— Not set —'}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div style={card({ marginBottom: 14 })}>
+        <span style={lbl()}>Comments / Notes</span>
+        <textarea value={comments} disabled={readOnly} onChange={e => update('comments', e.target.value)} placeholder="Add notes…" style={{ ...inp(), resize: 'vertical', minHeight: 80, lineHeight: 1.6 }} />
+      </div>
+
+      {!readOnly && <div style={{ fontSize: 12, color: S.text3 }}>Changes save automatically.</div>}
+    </div>
+  );
+}
+
+// ─── ADMIN OVERVIEW ────────────────────────────────────────────────────────────
+function AdminOverview({ csvData, callEdits, assignments, effectiveStatus, effectiveAssignment, onSelectMember, members }) {
+  const isMobile = useIsMobile();
+  const [period, setPeriod] = useState('month');
+  const [filterDate, setFilterDate] = useState(today());
+
+  const getChartData = (member) => {
+    if (!csvData) return [];
+    const rows = csvData.rows.filter(r => { const a = effectiveAssignment(r); return a && a.member === member; });
+
+    if (period === 'day') {
+      const filtered = rows.filter(r => effectiveAssignment(r)?.date === filterDate);
+      const done = filtered.filter(r => effectiveStatus(r) === 'Yes').length;
+      const late = filtered.filter(r => isLate(effectiveAssignment(r)?.date, effectiveStatus(r))).length;
+      return [{ label: formatDate(filterDate), done, late, assigned: filtered.length }];
+    }
+
+    if (period === 'week') {
+      const base = new Date(filterDate + 'T00:00:00');
+      const monday = new Date(base); monday.setDate(base.getDate() - ((base.getDay() + 6) % 7));
+      return Array.from({ length: 7 }, (_, i) => {
+        const d = new Date(monday); d.setDate(monday.getDate() + i);
+        const dStr = d.toISOString().slice(0, 10);
+        const filtered = rows.filter(r => effectiveAssignment(r)?.date === dStr);
+        const done = filtered.filter(r => effectiveStatus(r) === 'Yes').length;
+        const late = filtered.filter(r => isLate(effectiveAssignment(r)?.date, effectiveStatus(r))).length;
+        return { label: d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric' }), done, late, assigned: filtered.length };
+      }).filter(d => d.assigned > 0);
+    }
+
+    const ym = filterDate.slice(0, 7);
+    const daysInMonth = new Date(parseInt(ym.slice(0, 4)), parseInt(ym.slice(5, 7)), 0).getDate();
+    const weeks = [[], [], [], [], []];
+    for (let d = 1; d <= daysInMonth; d++) {
+      weeks[Math.floor((d - 1) / 7)].push(`${ym}-${String(d).padStart(2, '0')}`);
+    }
+    return weeks.filter(w => w.length > 0).map((weekDays, wi) => {
+      const filtered = rows.filter(r => weekDays.includes(effectiveAssignment(r)?.date ?? ''));
+      const done = filtered.filter(r => effectiveStatus(r) === 'Yes').length;
+      const late = filtered.filter(r => isLate(effectiveAssignment(r)?.date, effectiveStatus(r))).length;
+      const startLabel = formatDate(weekDays[0]).split(' ').slice(0, 2).join(' ');
+      return { label: `W${wi + 1} (${startLabel})`, done, late, assigned: filtered.length };
+    }).filter(d => d.assigned > 0);
+  };
+
+  return (
+    <div style={{ padding: isMobile ? '16px 12px' : '28px 32px' }}>
+      <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 6 }}>Overview</div>
+      <div style={{ fontSize: 13, color: S.text2, marginBottom: 24 }}>All members' call performance</div>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 20, alignItems: 'center', flexWrap: 'wrap' }}>
+        {['day', 'week', 'month'].map(p => (
+          <button key={p} onClick={() => setPeriod(p)} style={{ padding: '6px 14px', borderRadius: 7, border: `1px solid ${period === p ? S.accent : S.border2}`, background: period === p ? S.accentDim : 'transparent', color: period === p ? S.accent : S.text2, fontSize: 12, fontWeight: 500, cursor: 'pointer', fontFamily: "'DM Sans', sans-serif", textTransform: 'capitalize' }}>{p}</button>
+        ))}
+        <input type="date" value={filterDate} onChange={e => setFilterDate(e.target.value)} style={{ ...inp({ width: 'auto', fontSize: 12, padding: '5px 10px' }) }} />
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 16 }}>
+        {members.map(m => {
+          const allRows = csvData ? csvData.rows.filter(r => { const a = effectiveAssignment(r); return a && a.member === m; }) : [];
+          const done = allRows.filter(r => effectiveStatus(r) === 'Yes').length;
+          const late = allRows.filter(r => isLate(effectiveAssignment(r)?.date, effectiveStatus(r))).length;
+          const data = getChartData(m);
+          return (
+            <div key={m} style={card({ cursor: 'pointer' })} onClick={() => onSelectMember(m)}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                <div style={{ fontWeight: 600, fontSize: 15 }}>{m}</div>
+                <div style={{ display: 'flex', gap: 8, fontSize: 12 }}>
+                  <span style={{ color: S.success }}>{done} done</span>
+                  {late > 0 && <span style={{ color: S.danger }}>{late} late</span>}
+                  <span style={{ color: S.text3 }}>{allRows.length} total</span>
+                </div>
+              </div>
+              <MiniBarChart data={data} />
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── ADMIN MEMBER VIEW ────────────────────────────────────────────────────────
+function AdminMemberView({ member, csvData, callEdits, assignments, effectiveStatus, effectiveAssignment, saveEdits, selectedCall, setSelectedCall, showToast }) {
+  const isMobile = useIsMobile();
+  const [search, setSearch] = useState('');
+  const [mobileView, setMobileView] = useState('list');
+  const allRows = csvData ? csvData.rows.filter(r => { const a = effectiveAssignment(r); return a && a.member === member; }) : [];
+  const todayRows = allRows.filter(r => effectiveAssignment(r)?.date === today());
+  const displayRows = search ? allRows.filter(r => getCol(r._raw, csvData?.col?.name).toLowerCase().includes(search.toLowerCase()) || getCol(r._raw, csvData?.col?.phone).includes(search)) : allRows;
+
+  const handleSelect = (r) => {
+    setSelectedCall(r);
+    if (isMobile) setMobileView('detail');
+  };
+
+  return (
+    <div style={{ display: 'flex', height: '100%' }}>
+      <div style={{ width: isMobile ? '100%' : 280, minWidth: isMobile ? 0 : 280, borderRight: `1px solid ${S.border}`, display: isMobile && mobileView === 'detail' ? 'none' : 'flex', flexDirection: 'column' }}>
+        <div style={{ padding: '16px 12px 8px' }}>
+          <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 2 }}>{member}</div>
+          <div style={{ fontSize: 12, color: S.text2, marginBottom: 10 }}>{todayRows.length} today · {allRows.length} total</div>
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search…" style={{ ...inp({ fontSize: 12, padding: '7px 10px' }) }} />
+        </div>
+        <OverviewBar rows={allRows} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment} />
+        <div style={{ flex: 1, overflowY: 'auto', padding: '4px 8px' }}>
+          <CallList rows={displayRows} csvData={csvData} effectiveStatus={effectiveStatus} effectiveAssignment={effectiveAssignment} selectedIdx={selectedCall?._idx ?? null} onSelect={handleSelect} showToast={showToast} />
+        </div>
+      </div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '16px' : '28px 32px', display: isMobile && mobileView === 'list' ? 'none' : 'block' }}>
+        {isMobile && mobileView === 'detail' && (
+          <button onClick={() => setMobileView('list')} style={{ ...btn('ghost', { fontSize: 12, marginBottom: 16 }) }}>← Back to list</button>
+        )}
+        {selectedCall
+          ? <CallDetail row={selectedCall} csvData={csvData} callEdits={callEdits} effectiveStatus={effectiveStatus} saveEdits={saveEdits} showToast={showToast} readOnly={false} />
+          : <EmptyState label={`Select a call to review ${member}'s work`} />}
+      </div>
+    </div>
+  );
+}
+
+// ─── ASSIGN VIEW ──────────────────────────────────────────────────────────────
+const PAGE_SIZE = 100;
+
+function AssignView({ csvData, callEdits, assignments, effectiveStatus, effectiveAssignment, saveAssignments, showToast, members }) {
+  const [selectedMember, setSelectedMember] = useState(null);
+  const [assignDate, setAssignDate] = useState(today());
+  const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState(new Set());
+  const [filterProgram, setFilterProgram] = useState('');
+  const [sortBy, setSortBy] = useState('row');
+  const [sortDir, setSortDir] = useState('asc');
+  const [page, setPage] = useState(0);
+  const isMobile = useIsMobile();
+
+  if (!csvData) return <div style={{ padding: 32, color: S.text2 }}>Load a sheet first from the Sheets tab to assign calls.</div>;
+
+  // collect unique programs for filter dropdown
+  const allPrograms = [...new Set(csvData.rows.map(r => getCol(r._raw, csvData.col.program)).filter(Boolean))].sort();
+
+  const unassigned = csvData.rows.filter(r => !effectiveAssignment(r));
+
+  // filter
+  let filtered = unassigned;
+  if (search) filtered = filtered.filter(r => getCol(r._raw, csvData.col.name).toLowerCase().includes(search.toLowerCase()) || getCol(r._raw, csvData.col.phone).includes(search));
+  if (filterProgram) filtered = filtered.filter(r => getCol(r._raw, csvData.col.program) === filterProgram);
+
+  // sort
+  filtered = [...filtered].sort((a, b) => {
+    let valA, valB;
+    if (sortBy === 'row') { valA = a._idx; valB = b._idx; }
+    else if (sortBy === 'name') { valA = getCol(a._raw, csvData.col.name).toLowerCase(); valB = getCol(b._raw, csvData.col.name).toLowerCase(); }
+    else if (sortBy === 'program') { valA = getCol(a._raw, csvData.col.program).toLowerCase(); valB = getCol(b._raw, csvData.col.program).toLowerCase(); }
+    if (valA < valB) return sortDir === 'asc' ? -1 : 1;
+    if (valA > valB) return sortDir === 'asc' ? 1 : -1;
+    return 0;
+  });
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages - 1);
+  const pageRows = filtered.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
+
+  const toggleSelect = (idx) => {
+    const s = new Set(selected);
+    s.has(idx) ? s.delete(idx) : s.add(idx);
+    setSelected(s);
+  };
+
+  const togglePageSelect = () => {
+    const pageIdxs = pageRows.map(r => r._idx);
+    const allSelected = pageIdxs.every(i => selected.has(i));
+    const s = new Set(selected);
+    pageIdxs.forEach(i => allSelected ? s.delete(i) : s.add(i));
+    setSelected(s);
+  };
+
+  const assignSelected = async () => {
+    if (selected.size === 0) { showToast('Select at least one call', 'err'); return; }
+    if (!selectedMember) { showToast('Select a member first', 'err'); return; }
+    const newAss = { ...assignments };
+    selected.forEach(idx => { newAss[idx] = { member: selectedMember, date: assignDate }; });
+    await saveAssignments(newAss);
+    setSelected(new Set());
+    showToast(`Assigned ${selected.size} calls to ${selectedMember} ✓`);
+  };
+
+  const cycleSort = (field) => {
+    if (sortBy === field) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortBy(field); setSortDir('asc'); }
+    setPage(0);
+  };
+
+  const sortIcon = (field) => sortBy === field ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ' ↕';
+
+  const pageAllSelected = pageRows.length > 0 && pageRows.every(r => selected.has(r._idx));
+
+  return (
+    <div style={{ padding: isMobile ? '12px 10px' : '20px 24px' }}>
+      <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 20 }}>Assign Calls</div>
+
+      {/* Assign bar */}
+      <div style={{ ...card({ marginBottom: 20 }) }}>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          <div>
+            <span style={lbl()}>Assign to</span>
+            <select value={selectedMember || ''} onChange={e => setSelectedMember(e.target.value)} style={sel({ width: 'auto' })}>
+              <option value="">Select member…</option>
+              {members.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div>
+            <span style={lbl()}>For date</span>
+            <input type="date" value={assignDate} onChange={e => setAssignDate(e.target.value)} style={inp({ width: 'auto' })} />
+          </div>
+          <button onClick={assignSelected} disabled={selected.size === 0} style={btn('accent', { opacity: selected.size === 0 ? 0.4 : 1 })}>
+            Assign {selected.size > 0 ? `(${selected.size})` : ''} →
+          </button>
+          {selected.size > 0 && <button onClick={() => setSelected(new Set())} style={btn('ghost', { fontSize: 12 })}>Clear selection</button>}
+        </div>
+      </div>
+
+      {/* Filters & sort row */}
+      <div style={{ display: 'flex', gap: 10, marginBottom: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        <input value={search} onChange={e => { setSearch(e.target.value); setPage(0); }} placeholder="Search name or phone…" style={{ ...inp({ flex: 1, minWidth: 160 }) }} />
+        <div>
+          <span style={lbl()}>Program</span>
+          <select value={filterProgram} onChange={e => { setFilterProgram(e.target.value); setPage(0); }} style={sel({ width: 'auto' })}>
+            <option value="">All programs</option>
+            {allPrograms.map(p => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </div>
+        <div>
+          <span style={lbl()}>Sort by</span>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {[['row', 'Row'], ['name', 'Name'], ['program', 'Program']].map(([field, label]) => (
+              <button key={field} onClick={() => cycleSort(field)} style={{ ...btn(sortBy === field ? 'default' : 'ghost', { fontSize: 12, padding: '7px 11px', borderColor: sortBy === field ? S.accent : S.border2, color: sortBy === field ? S.accent : S.text2 }) }}>
+                {label}{sortIcon(field)}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Stats row */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: S.text2 }}>
+          {unassigned.length} unassigned · {filtered.length} matching · {selected.size > 0 && <span style={{ color: S.accent }}>{selected.size} selected · </span>}
+          page {safePage + 1} of {totalPages}
+        </div>
+        <button onClick={togglePageSelect} style={btn('ghost', { fontSize: 11, padding: '4px 10px' })}>
+          {pageAllSelected ? 'Deselect page' : 'Select page'}
+        </button>
+      </div>
+
+      {/* List */}
+      <div style={{ display: 'grid', gap: 6 }}>
+        {pageRows.map(row => {
+          const name = getCol(row._raw, csvData.col.name) || 'Unknown';
+          const phone = getCol(row._raw, csvData.col.phone);
+          const prog = getCol(row._raw, csvData.col.program);
+          const isSel = selected.has(row._idx);
+          const sheetRow = row._idx + 2;
+          return (
+            <div key={row._idx} onClick={() => toggleSelect(row._idx)} style={{ ...card({ display: 'flex', alignItems: 'center', gap: 12, cursor: 'pointer', border: `1px solid ${isSel ? S.accent : S.border}`, background: isSel ? S.accentDim : S.surface }), padding: '10px 14px' }}>
+              <div style={{ width: 18, height: 18, borderRadius: 4, border: `2px solid ${isSel ? S.accent : S.border2}`, background: isSel ? S.accent : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                {isSel && <span style={{ color: '#000', fontSize: 11, fontWeight: 700 }}>✓</span>}
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 500 }}>{name}</div>
+                <div style={{ fontSize: 11, color: S.text3 }}>{phone}{prog ? ` · ${prog}` : ''}</div>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
+                <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: S.text3, background: S.surface2, border: `1px solid ${S.border}`, borderRadius: 5, padding: '2px 7px' }}>row {sheetRow}</div>
+                {prog && <div style={{ fontSize: 10, color: S.blue, background: 'rgba(88,166,255,.1)', border: `1px solid rgba(88,166,255,.2)`, borderRadius: 4, padding: '1px 6px' }}>{prog}</div>}
+              </div>
+            </div>
+          );
+        })}
+        {filtered.length === 0 && <div style={{ textAlign: 'center', color: S.text3, padding: 20, fontSize: 13 }}>No unassigned calls match the current filters.</div>}
+      </div>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 20, flexWrap: 'wrap' }}>
+          <button onClick={() => setPage(0)} disabled={safePage === 0} style={btn('ghost', { fontSize: 12, padding: '6px 10px', opacity: safePage === 0 ? 0.4 : 1 })}>«</button>
+          <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={safePage === 0} style={btn('ghost', { fontSize: 12, padding: '6px 12px', opacity: safePage === 0 ? 0.4 : 1 })}>‹ Prev</button>
+          {Array.from({ length: totalPages }, (_, i) => i).filter(i => Math.abs(i - safePage) <= 2).map(i => (
+            <button key={i} onClick={() => setPage(i)} style={btn(i === safePage ? 'default' : 'ghost', { fontSize: 12, padding: '6px 12px', borderColor: i === safePage ? S.accent : S.border2, color: i === safePage ? S.accent : S.text2 })}>{i + 1}</button>
+          ))}
+          <button onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))} disabled={safePage === totalPages - 1} style={btn('ghost', { fontSize: 12, padding: '6px 12px', opacity: safePage === totalPages - 1 ? 0.4 : 1 })}>Next ›</button>
+          <button onClick={() => setPage(totalPages - 1)} disabled={safePage === totalPages - 1} style={btn('ghost', { fontSize: 12, padding: '6px 10px', opacity: safePage === totalPages - 1 ? 0.4 : 1 })}>»</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── SETTINGS VIEW ────────────────────────────────────────────────────────────
+function SettingsView({ pins, onPinChange, showToast, admins, members, onMembersChange, onAdminsChange }) {
+  const [newPins, setNewPins] = useState({ ...pins });
+  const [newMemberName, setNewMemberName] = useState('');
+  const [newAdminName, setNewAdminName] = useState('');
+  const [tab, setTab] = useState('pins');
+  const isMobile = useIsMobile();
+
+  const addMember = async () => {
+    const name = newMemberName.trim();
+    if (!name) return;
+    if (members.includes(name) || admins.includes(name)) { showToast('Name already exists', 'err'); return; }
+    await onMembersChange([...members, name]);
+    setNewMemberName('');
+    showToast(`${name} added as member ✓`);
+  };
+
+  const removeMember = async (name) => {
+    if (!confirm(`Remove member "${name}"? Their assigned calls won't be deleted.`)) return;
+    await onMembersChange(members.filter(m => m !== name));
+    showToast(`${name} removed`);
+  };
+
+  const addAdmin = async () => {
+    const name = newAdminName.trim();
+    if (!name) return;
+    if (members.includes(name) || admins.includes(name)) { showToast('Name already exists', 'err'); return; }
+    const updatedPins = { ...pins, [name]: '1234' };
+    await onAdminsChange([...admins, name]);
+    await onPinChange(name, '1234');
+    setNewAdminName('');
+    showToast(`${name} added as admin (default PIN: 1234) ✓`);
+  };
+
+  const removeAdmin = async (name) => {
+    if (admins.length <= 1) { showToast('Must have at least one admin', 'err'); return; }
+    if (!confirm(`Remove admin "${name}"?`)) return;
+    await onAdminsChange(admins.filter(a => a !== name));
+    showToast(`${name} removed`);
+  };
+
+  return (
+    <div style={{ padding: isMobile ? '16px 12px' : '28px 32px', maxWidth: 520 }}>
+      <div style={{ fontSize: 20, fontWeight: 600, marginBottom: 20 }}>Settings</div>
+
+      <div style={{ display: 'flex', gap: 6, marginBottom: 24 }}>
+        {[['pins', '🔑 PINs'], ['members', '👥 Members'], ['admins', '🔒 Admins']].map(([k, label]) => (
+          <button key={k} onClick={() => setTab(k)} style={{ padding: '7px 16px', borderRadius: 8, border: `1px solid ${tab === k ? S.accent : S.border2}`, background: tab === k ? S.accentDim : 'transparent', color: tab === k ? S.accent : S.text2, fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: "'DM Sans', sans-serif" }}>{label}</button>
+        ))}
+      </div>
+
+      {tab === 'pins' && (
+        <div>
+          {admins.map(admin => (
+            <div key={admin} style={{ ...card({ marginBottom: 14 }) }}>
+              <span style={lbl()}>{admin}'s PIN</span>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input type="password" maxLength={8} value={newPins[admin] || ''} onChange={e => setNewPins(p => ({ ...p, [admin]: e.target.value }))} style={inp()} placeholder="Enter new PIN" />
+                <button onClick={async () => { await onPinChange(admin, newPins[admin]); showToast(`${admin}'s PIN updated ✓`); }} style={btn('accent', { whiteSpace: 'nowrap' })}>Save</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === 'members' && (
+        <div>
+          <div style={{ fontSize: 13, color: S.text2, marginBottom: 16 }}>Members can log in without a PIN and see their assigned calls.</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
+            {members.map(m => (
+              <div key={m} style={{ ...card({ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }), padding: '12px 16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontSize: 20 }}>👤</span>
+                  <span style={{ fontSize: 14, fontWeight: 500 }}>{m}</span>
+                </div>
+                <button onClick={() => removeMember(m)} style={btn('danger', { fontSize: 12, padding: '5px 12px' })}>Remove</button>
+              </div>
+            ))}
+            {members.length === 0 && <div style={{ color: S.text3, fontSize: 13, textAlign: 'center', padding: '16px 0' }}>No members yet.</div>}
+          </div>
+          <div style={{ ...card() }}>
+            <span style={lbl()}>Add New Member</span>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input value={newMemberName} onChange={e => setNewMemberName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addMember()} placeholder="Full name" style={inp()} />
+              <button onClick={addMember} style={btn('accent', { whiteSpace: 'nowrap' })}>+ Add</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab === 'admins' && (
+        <div>
+          <div style={{ fontSize: 13, color: S.text2, marginBottom: 16 }}>Admins require a PIN to log in and have full access to all features.</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
+            {admins.map(a => (
+              <div key={a} style={{ ...card({ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }), padding: '12px 16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontSize: 20 }}>🔒</span>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 500 }}>{a}</div>
+                    <div style={{ fontSize: 11, color: S.text3 }}>Change PIN in the PINs tab</div>
+                  </div>
+                </div>
+                <button onClick={() => removeAdmin(a)} disabled={admins.length <= 1} style={btn('danger', { fontSize: 12, padding: '5px 12px', opacity: admins.length <= 1 ? 0.4 : 1 })}>Remove</button>
+              </div>
+            ))}
+          </div>
+          <div style={{ ...card() }}>
+            <span style={lbl()}>Add New Admin</span>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input value={newAdminName} onChange={e => setNewAdminName(e.target.value)} onKeyDown={e => e.key === 'Enter' && addAdmin()} placeholder="Full name" style={inp()} />
+              <button onClick={addAdmin} style={btn('accent', { whiteSpace: 'nowrap' })}>+ Add</button>
+            </div>
+            <div style={{ fontSize: 11, color: S.text3, marginTop: 8 }}>New admins get a default PIN of 1234. Change it in the PINs tab.</div>
+          </div>
+        </div>
+      )}
+
+      <div style={{ marginTop: 28, padding: '14px 16px', background: 'rgba(63,185,80,.07)', border: `1px solid rgba(63,185,80,.2)`, borderRadius: 10 }}>
+        <div style={{ fontSize: 13, color: S.success, fontWeight: 500, marginBottom: 4 }}>Cloud storage active</div>
+        <div style={{ fontSize: 12, color: S.text3, lineHeight: 1.6 }}>
+          All data (sheets, assignments, edits, members) is stored in the cloud. Changes are visible to everyone in real time.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── DOWNLOAD REPORT ─────────────────────────────────────────────────────────
+function DownloadReportBtn({ csvData, callEdits, assignments, effectiveStatus, effectiveAssignment, showToast, members }) {
+  const [open, setOpen] = useState(false);
+  const [member, setMember] = useState('All');
+  const [period, setPeriod] = useState('month');
+  const [filterDate, setFilterDate] = useState(today());
+
+  const download = () => {
+    if (!csvData) { showToast('No sheet loaded', 'err'); return; }
+    const { col, rows } = csvData;
+    let filtered = rows.filter(r => effectiveAssignment(r));
+    if (member !== 'All') filtered = filtered.filter(r => effectiveAssignment(r)?.member === member);
+    if (period === 'day') filtered = filtered.filter(r => effectiveAssignment(r)?.date === filterDate);
+    else if (period === 'week') {
+      const base = new Date(filterDate + 'T00:00:00');
+      const mon = new Date(base); mon.setDate(base.getDate() - ((base.getDay() + 6) % 7));
+      const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+      filtered = filtered.filter(r => { const d = effectiveAssignment(r)?.date ?? ''; return d >= mon.toISOString().slice(0,10) && d <= sun.toISOString().slice(0,10); });
+    } else if (period === 'month') {
+      const ym = filterDate.slice(0, 7);
+      filtered = filtered.filter(r => effectiveAssignment(r)?.date?.startsWith(ym));
+    }
+
+    const headers = ['Name', 'Phone', 'Program', 'Gender', 'Person Status', 'Assigned To', 'Assigned Date', 'Contact Status', 'Interested', 'Comments', 'Done', 'Sheet', 'Row'];
+    const csvRows = [headers.join(','), ...filtered.map(r => {
+      const e = callEdits[r._idx] || {};
+      const a = effectiveAssignment(r) || { member: '', date: '' };
+      const row = [
+        getCol(r._raw, col.name), getCol(r._raw, col.phone), getCol(r._raw, col.program),
+        getCol(r._raw, col.gender), getCol(r._raw, col.personStatus),
+        a.member || '', a.date || '',
+        e.contactStatus || getCol(r._raw, col.contactStatus) || '',
+        e.interested || getCol(r._raw, col.interested) || '',
+        e.comments || getCol(r._raw, col.comments) || '',
+        e.done ? 'Yes' : 'No',
+        csvData.sheetName || '',
+        String(r._idx + 2),
+      ];
+      return row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',');
+    })];
+    const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url;
+    a.download = `AIESEC_report_${member}_${period}_${filterDate}.csv`;
+    a.click(); URL.revokeObjectURL(url);
+    showToast('Report downloaded ✓');
+    setOpen(false);
+  };
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <button onClick={() => setOpen(o => !o)} style={{ ...btn('ghost', { width: '100%', justifyContent: 'center', fontSize: 12 }) }}>📥 Download Report</button>
+      {open && (
+        <div style={{ position: 'absolute', bottom: 44, left: 0, right: 0, background: S.surface, border: `1px solid ${S.border2}`, borderRadius: 10, padding: 14, zIndex: 100 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div>
+              <span style={lbl()}>Member</span>
+              <select value={member} onChange={e => setMember(e.target.value)} style={sel()}>
+                <option value="All">All members</option>
+                {(members || []).map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+            </div>
+            <div>
+              <span style={lbl()}>Period</span>
+              <select value={period} onChange={e => setPeriod(e.target.value)} style={sel()}>
+                <option value="day">Day</option>
+                <option value="week">Week</option>
+                <option value="month">Month</option>
+                <option value="all">All time</option>
+              </select>
+            </div>
+            {period !== 'all' && (
+              <div>
+                <span style={lbl()}>Date</span>
+                <input type="date" value={filterDate} onChange={e => setFilterDate(e.target.value)} style={inp()} />
+              </div>
+            )}
+            <button onClick={download} style={btn('accent', { justifyContent: 'center' })}>Download CSV</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── EMPTY STATE ──────────────────────────────────────────────────────────────
+function EmptyState({ label }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60vh', color: S.text3, gap: 10 }}>
+      <div style={{ fontSize: 40 }}>📋</div>
+      <div style={{ fontSize: 14, color: S.text2 }}>{label}</div>
+    </div>
+  );
+}
+
+// ─── MOUNT ────────────────────────────────────────────────────────────────────
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>
